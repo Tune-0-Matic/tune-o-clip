@@ -325,6 +325,12 @@ func _ollama_reachable() -> bool:
 
 
 func start_ollama() -> void:
+	if OS.get_name() == "Linux" and FileAccess.file_exists("/etc/systemd/system/ollama.service"):
+		# setup_linux.sh installs Ollama as a system service and its models live with it: start that service through
+		# the desktop's password prompt (pkexec), never a user `ollama serve` (it would have no models)
+		OS.create_process("pkexec", ["systemctl", "start", "ollama"])
+		_log("[BOOT] Ollama was off: starting the ollama service (enter your password in the prompt).", DIM)
+		return
 	if OS.get_name() == "Windows":
 		# this PC's i7-860 (no AVX) + older NVIDIA driver only run Ollama on the GPU through Vulkan
 		OS.set_environment("OLLAMA_LLM_LIBRARY", "vulkan")
@@ -332,7 +338,8 @@ func start_ollama() -> void:
 	if not FileAccess.file_exists(exe):
 		exe = "ollama"  # on PATH (Linux, or a custom install)
 	_started_ollama_pid = OS.create_process(exe, ["serve"])
-	_log("[BOOT] Ollama was off: started it (Vulkan)." if _started_ollama_pid > 0 else "[BOOT] Could not start Ollama (%s)." % exe,
+	_log(("[BOOT] Ollama was off: started it" + (" (Vulkan)." if OS.get_name() == "Windows" else ".")) if _started_ollama_pid > 0
+			else "[BOOT] Could not start Ollama (%s)." % exe,
 			DIM if _started_ollama_pid > 0 else AMBER)
 
 
@@ -557,7 +564,10 @@ func _set_busy(on: bool) -> void:
 
 
 func _start(args: PackedStringArray) -> void:
-	var proc := OS.execute_with_pipe(_python(), args)  # blocking pipes: non-blocking ones read EOF instantly
+	# blocking pipes: non-blocking ones read EOF instantly. Linux: setsid gives the run its own session (same pid,
+	# setsid execs in place), so closing the panel can stop its clipper / ffmpeg / yt-dlp children too.
+	var proc := OS.execute_with_pipe("setsid", PackedStringArray([_python()]) + args) if OS.get_name() == "Linux" \
+			else OS.execute_with_pipe(_python(), args)
 	if proc.is_empty():
 		_log("Could not start Python (%s)." % _python(), BAD)
 		show_banner("Could not start Python (%s)" % _python())
@@ -1162,8 +1172,11 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
 	flush_deletes(0, true)
 	close_preview()
-	if _thread != null:
-		OS.kill(_pid)  # closes the pipes, which unblocks the reader thread
+	if _thread != null:  # killing it closes the pipes, which unblocks the reader thread
+		if OS.get_name() == "Linux":
+			OS.execute("kill", ["-TERM", "--", "-%d" % _pid])  # the run's whole session (see _start)
+		else:
+			OS.kill(_pid)
 		_thread.wait_to_finish()
 	stop_telemetry()
 	stop_started_services()

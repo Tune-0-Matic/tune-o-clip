@@ -118,8 +118,8 @@ EOF
 systemctl --user daemon-reload 2>/dev/null || true
 sudo loginctl enable-linger "$USER"  # the user service keeps running without anyone logged in
 
-# --- 6. desktop app: the official Godot binary runs app/ directly (no export templates, nothing to build) ----------
-GODOT_VER="4.7.2-stable"  # the version the app is built with (app/project.godot)
+# --- 6. desktop app: the official Godot binary runs the tune-o-clip panel (godot_app/) directly: no export templates --
+GODOT_VER="4.7.2-stable"  # the version the panel is built with (godot_app/project.godot)
 say "Desktop app (Godot $GODOT_VER)"
 GODOT="$ROOT/bin/godot/Godot_v${GODOT_VER}_linux.x86_64"
 if [ ! -x "$GODOT" ]; then
@@ -130,14 +130,14 @@ if [ ! -x "$GODOT" ]; then
   rm -f bin/godot/godot.zip
   chmod +x "$GODOT"
 fi
-"$GODOT" --headless --path app --import >/dev/null 2>&1 || warn "Godot's first import failed: the app will import on its first launch"
+"$GODOT" --headless --path godot_app --import >/dev/null 2>&1 || warn "Godot's first import failed: the app will import on its first launch"
 launcher() {  # $1 = .desktop path; OpenGL 3.3 (Compatibility) suits the Vega 3 iGPU
   cat > "$1" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Tune-O-Clip
-Comment=Rate shorts, fetch clips and run the 24/7 clip bot
-Exec="$GODOT" --path "$ROOT/app" --rendering-driver opengl3
+Comment=Clip YouTube videos and Twitch streamers into vertical shorts
+Exec="$GODOT" --path "$ROOT/godot_app" --rendering-driver opengl3
 Icon=$ROOT/godot_app/icon.png
 Terminal=false
 Categories=AudioVideo;Video;

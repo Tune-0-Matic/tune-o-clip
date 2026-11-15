@@ -57,9 +57,11 @@ Windows: commit + `git push`. Mini PC: `cd ~/tune-o-clip && git pull && ./setup_
 ## The desktop app (no terminal needed)
 
 `setup_linux.sh` downloads the official Godot 4.7.2 binary once into `bin/godot/` (~80 MB, not in git) and adds a
-**Tune-O-Clip** launcher to the desktop and to Applications > Multimedia. It opens the app in `app/` (Clip Rate):
-the Scroller / Rated / Request & Upload tabs, plus a top bar with the bot's status, **Start Bot** (runs now and after
-every reboot), **Stop Bot**, **Restart Bot**, **Open Web Dashboard**, the unrated count and free disk space.
+**Tune-O-Clip** launcher to the desktop and to Applications > Multimedia. It opens the tune-o-clip panel
+(`godot_app/`, the same app as on Windows): Single / Batch / Twitch runs, SETTINGS, AUTO POST, the clip list with
+the built-in preview player, and the telemetry sidebar. On this machine it runs the low-spec profile by itself (CPU
+Whisper, warm Ollama, VAAPI or libx264). If Ollama is off at start-up it asks for your password once to start the
+ollama service. Use either the panel or the 24/7 service at a time: both share workspace/queue.db and the 6 GB RAM.
 If Xfce asks about an "untrusted launcher" on the first double-click, choose *Mark Executable* (only when setup ran
 over SSH).
 
