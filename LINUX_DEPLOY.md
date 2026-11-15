@@ -54,7 +54,16 @@ delete it from Downloads once installed.
 Windows: commit + `git push`. Mini PC: `cd ~/tune-o-clip && git pull && ./setup_linux.sh` (then
 `systemctl --user restart tune-o-clip` if it runs as a service). `.env`, `workspace/` and videos are never touched.
 
-## Running it
+## The desktop app (no terminal needed)
+
+`setup_linux.sh` downloads the official Godot 4.7.2 binary once into `bin/godot/` (~80 MB, not in git) and adds a
+**Tune-O-Clip** launcher to the desktop and to Applications > Multimedia. It opens the app in `app/` (Clip Rate):
+the Scroller / Rated / Request & Upload tabs, plus a top bar with the bot's status, **Start Bot** (runs now and after
+every reboot), **Stop Bot**, **Restart Bot**, **Open Web Dashboard**, the unrated count and free disk space.
+If Xfce asks about an "untrusted launcher" on the first double-click, choose *Mark Executable* (only when setup ran
+over SSH).
+
+## Running it (terminal alternative)
 
 ```bash
 ./start_linux.sh                                  # in the foreground (Ctrl+C stops)

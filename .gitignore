@@ -32,3 +32,5 @@ calibration_studio/clip_rate/ratings_queue.json.*
 calibration_studio/clip_rate/batches/
 calibration_studio/clip_rate/CLAUDE_TRAINING_BATCH.*
 *.log
+# the Linux Godot binary setup_linux.sh downloads (~80 MB)
+bin/

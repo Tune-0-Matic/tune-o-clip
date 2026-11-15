@@ -118,6 +118,45 @@ EOF
 systemctl --user daemon-reload 2>/dev/null || true
 sudo loginctl enable-linger "$USER"  # the user service keeps running without anyone logged in
 
+# --- 6. desktop app: the official Godot binary runs app/ directly (no export templates, nothing to build) ----------
+GODOT_VER="4.7.2-stable"  # the version the app is built with (app/project.godot)
+say "Desktop app (Godot $GODOT_VER)"
+GODOT="$ROOT/bin/godot/Godot_v${GODOT_VER}_linux.x86_64"
+if [ ! -x "$GODOT" ]; then
+  mkdir -p bin/godot
+  curl -fL --retry 3 -o bin/godot/godot.zip \
+    "https://github.com/godotengine/godot/releases/download/${GODOT_VER}/Godot_v${GODOT_VER}_linux.x86_64.zip"
+  unzip -oq bin/godot/godot.zip -d bin/godot
+  rm -f bin/godot/godot.zip
+  chmod +x "$GODOT"
+fi
+"$GODOT" --headless --path app --import >/dev/null 2>&1 || warn "Godot's first import failed: the app will import on its first launch"
+launcher() {  # $1 = .desktop path; OpenGL 3.3 (Compatibility) suits the Vega 3 iGPU
+  cat > "$1" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Tune-O-Clip
+Comment=Rate shorts, fetch clips and run the 24/7 clip bot
+Exec="$GODOT" --path "$ROOT/app" --rendering-driver opengl3
+Icon=$ROOT/godot_app/icon.png
+Terminal=false
+Categories=AudioVideo;Video;
+EOF
+  chmod +x "$1"
+}
+mkdir -p "$HOME/.local/share/applications"
+launcher "$HOME/.local/share/applications/tune-o-clip.desktop"
+DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
+mkdir -p "$DESK"
+launcher "$DESK/Tune-O-Clip.desktop"
+# Xfce 4.18 only runs a desktop launcher it trusts: GNOME-style flag + Xfce's checksum (needs the desktop session's
+# D-Bus; over SSH this quietly fails and the first double-click asks "Mark executable" once instead)
+gio set "$DESK/Tune-O-Clip.desktop" metadata::trusted true 2>/dev/null || true
+gio set -t string "$DESK/Tune-O-Clip.desktop" metadata::xfce-exe-checksum \
+  "$(sha256sum "$DESK/Tune-O-Clip.desktop" | cut -d' ' -f1)" 2>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+echo "Launchers: Applications menu > Multimedia > Tune-O-Clip, and Tune-O-Clip on the desktop"
+
 say "Checklist"
 missing=0
 for key in TWITCH_CLIENT_ID TWITCH_CLIENT_SECRET; do
@@ -134,9 +173,9 @@ echo "   streamers to poll: $(paste -sd, workspace/twitch_channels.txt)  (edit w
 echo "   free disk: $(df -h --output=avail "$ROOT" | tail -1 | tr -d ' ')  (harvesting pauses under 5 GB)"
 echo
 if [ "$missing" -eq 0 ]; then
-  echo "Ready. Run it now:      ./start_linux.sh"
-  echo "Run it 24/7 (on boot):  systemctl --user enable --now tune-o-clip   (logs: journalctl --user -u tune-o-clip -f)"
+  echo "Ready. Double-click Tune-O-Clip on the desktop: Start Bot runs the 24/7 bot (and after every reboot)."
+  echo "Terminal alternative: ./start_linux.sh   or   systemctl --user enable --now tune-o-clip (logs: journalctl --user -u tune-o-clip -f)"
 else
-  echo "Fill in .env, then: ./start_linux.sh   or   systemctl --user enable --now tune-o-clip"
+  echo "Fill in .env, then double-click Tune-O-Clip on the desktop and press Start Bot."
 fi
 echo "Calibration studio web UI: ./start_linux.sh studio   (http://127.0.0.1:8787 on this machine)"

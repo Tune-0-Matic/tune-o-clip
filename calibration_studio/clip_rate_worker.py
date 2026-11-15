@@ -302,6 +302,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if hasattr(os, "setpgrp"):  # POSIX: lead a process group, so the app's Cancel stops clipper/ffmpeg/yt-dlp too
+        os.setpgrp()
     try:
         sys.exit(main())
     except KeyboardInterrupt:
