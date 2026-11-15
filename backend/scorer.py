@@ -470,6 +470,10 @@ def opening(c, seconds=2.5):
 # instead of a 12-32 s reload each time; measured 2026-11-14, 2.3 GB). The worker unloads it when it exits or is
 # cancelled; the editor unloads it before a render when VRAM_RENDER_MIB isn't free. ffmpeg gets 4 threads.
 
+import twitch_api  # noqa: E402  (stdlib-only .env reader)
+
+twitch_api.load_env()  # .env may set the TOC_* overrides below; real environment variables still win
+
 
 def total_ram_gib():
     """Physical RAM in GiB (POSIX sysconf), None where it isn't available (Windows)."""
@@ -487,6 +491,9 @@ LOW_SPEC = os.environ.get("TOC_LOW_SPEC", "1" if MINI_PC else "0") == "1"
 if LOW_SPEC:
     os.environ["TOC_LOW_SPEC"] = "1"
 KEEP_WARM = "5m"
+# the judge / director model: the 3B the taste profile was calibrated with; setup_linux.sh sets TOC_OLLAMA_MODEL=
+# qwen2.5:1.5b in the mini PC's .env (2x faster on its CPU)
+DEFAULT_MODEL = os.environ.get("TOC_OLLAMA_MODEL") or "richardyoung/qwen2.5-3b-instruct-abliterated"
 # s of wall clock per call, then one retry, then the caller's fallback; 60 s on the mini PC's CPU-only inference
 OLLAMA_TIMEOUT = float(os.environ.get("TOC_OLLAMA_TIMEOUT") or (60 if MINI_PC else 45))
 FALLBACK_MODELS = ("qwen2.5:1.5b",)  # setup_linux.sh pulls it next to the 3B the calibration was done with

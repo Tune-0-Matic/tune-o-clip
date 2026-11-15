@@ -408,7 +408,7 @@ def main():
     ap.add_argument("--whisper-model", default="small.en",
                     help="faster-whisper model for the candidate transcripts (small.en, base.en = faster on CPU)")
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto", help="whisper device (auto = CUDA, else CPU)")
-    ap.add_argument("--ollama-model", default="richardyoung/qwen2.5-3b-instruct-abliterated",
+    ap.add_argument("--ollama-model", default=scorer.DEFAULT_MODEL,
                     help="local Ollama model used to re-rate candidates if Ollama is running")
     ap.add_argument("--no-ollama", action="store_true", help="never call Ollama")
     ap.add_argument("--dedup-root", action="append", default=[], metavar="DIR",

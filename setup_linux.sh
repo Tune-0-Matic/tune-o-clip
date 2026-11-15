@@ -11,8 +11,10 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 ROOT="$PWD"
-MODEL="richardyoung/qwen2.5-3b-instruct-abliterated"  # the model the taste profile was calibrated with (~2 GB)
-FALLBACK="qwen2.5:1.5b"                                # scorer.FALLBACK_MODELS: used only when the 3B isn't pulled
+# Linux default judge / director model (~1 GB, about 2x faster than the 3B on the V120B's CPU). Written to .env as
+# TOC_OLLAMA_MODEL. The taste profile was calibrated on richardyoung/qwen2.5-3b-instruct-abliterated: to use that
+# instead, set TOC_OLLAMA_MODEL to it in .env and run this script again (it pulls whatever .env names).
+OLLAMA_MODEL="qwen2.5:1.5b"
 WHISPER="small.en"
 SWAP_GB=4
 say() { printf '\n\033[1;33m== %s\033[0m\n' "$*"; }
@@ -79,8 +81,12 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 curl -fs http://127.0.0.1:11434/api/tags >/dev/null || { warn "Ollama did not come up on 127.0.0.1:11434 (see: journalctl -u ollama)"; exit 1; }
-ollama pull "$MODEL" || warn "Could not pull $MODEL: the bot will use $FALLBACK"
-ollama pull "$FALLBACK" || warn "Could not pull $FALLBACK"
+[ -f .env ] || { [ -f env.txt ] && mv env.txt .env; } || true  # the Drive bundle's visible copy of .env
+[ -f .env ] || cp .env.example .env
+sed -i '1s/^\xEF\xBB\xBF//; s/\r$//' .env  # a .env saved by Windows Notepad: BOM + CRLF
+grep -q '^TOC_OLLAMA_MODEL=' .env || printf '\nTOC_OLLAMA_MODEL=%s\n' "$OLLAMA_MODEL" >> .env
+OLLAMA_MODEL=$(sed -n 's/^TOC_OLLAMA_MODEL=//p' .env | tail -1 | tr -d '"\r')
+ollama pull "$OLLAMA_MODEL" || warn "Could not pull $OLLAMA_MODEL: the bot uses any model Ollama has, or heuristics"
 
 # --- 4. Python venv (CPU only: faster-whisper uses CTranslate2, no PyTorch / CUDA wheels) --------------------------
 say "Python environment (.venv)"
@@ -93,7 +99,6 @@ echo "Downloading the Whisper model ($WHISPER, ~480 MB) once..."
 # --- 5. config + launcher -------------------------------------------------------------------------------------------
 say "Configuration"
 mkdir -p workspace output ready_to_post
-[ -f .env ] || cp .env.example .env
 [ -s workspace/twitch_channels.txt ] || printf 'caseoh_\nishowspeed\njynxzi\nlospollostv\n' > workspace/twitch_channels.txt
 chmod +x start_linux.sh
 mkdir -p "$HOME/.config/systemd/user"

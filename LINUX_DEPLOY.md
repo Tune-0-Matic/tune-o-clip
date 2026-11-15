@@ -32,6 +32,20 @@ cd ~/tune-o-clip && ./setup_linux.sh
 `setup_linux.sh` asks for your sudo password, then sets up swap, packages, Ollama + models, the Python venv and the
 Whisper model, and prints a checklist. Running it again is safe.
 
+## Or: from the Google Drive bundle (no SSH needed)
+
+`tune-o-clip-bundle.zip` (built next to the repo on the Windows PC) holds the code, its git history (remote already
+set to this repo), `.env` + a visible copy `env.txt`, and `cookies.txt`. Download it to `~/Downloads`, then:
+
+```bash
+unzip -oq ~/Downloads/tune-o-clip-bundle.zip -d ~
+cd ~/tune-o-clip && git status -s
+./setup_linux.sh
+```
+
+The bundle contains your keys and YouTube login cookies: keep it private on Drive (never "anyone with the link") and
+delete it from Downloads once installed. For `git pull` later, log in once: `sudo apt install -y gh && gh auth login`.
+
 ## Updating
 
 Windows: commit + `git push`. Mini PC: `cd ~/tune-o-clip && git pull && ./setup_linux.sh` (then

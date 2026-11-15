@@ -31,7 +31,7 @@ SETTINGS = ROOT / "workspace" / "settings.json"  # written by the Godot SETTINGS
 # per-streamer webcam boxes, learned from detections and manual overrides. Its own file: the panel rewrites
 # settings.json from memory on every change and would drop keys the editor added during a run.
 PRESETS = ROOT / "workspace" / "facecam_presets.json"
-DEFAULT_MODEL = "richardyoung/qwen2.5-3b-instruct-abliterated"
+DEFAULT_MODEL = scorer.DEFAULT_MODEL
 _WHISPER = {}
 
 

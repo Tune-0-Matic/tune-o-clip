@@ -17,6 +17,9 @@ calibration_studio/.app_profile/
 # secrets: never commit (keys live in .env, tokens in workspace/)
 .env.*
 !.env.example
+env.txt
+*.zip
+runs/
 *_token.json
 client_secret*.json
 # archives / scratch copies
