@@ -4,24 +4,38 @@ Target: Scala Media Player B396-H02 (Ryzen Embedded V120B 2C/4T, 6 GB RAM, Vega 
 Nothing needs configuring for the hardware: on Linux with <= 8 GB RAM the code switches itself to CPU Whisper, a warm
 Ollama, 4 ffmpeg threads, a 60 s Ollama timeout and VAAPI (Vega 3) or libx264 encoding.
 
-**Once, on the mini PC** (Mint has no SSH server by default): `sudo apt install -y openssh-server`, and note its
-user name + IP (`hostname -I`). Below, replace `you@192.168.1.50` with them.
+The code lives in the private repo https://github.com/Tune-0-Matic/tune-o-clip. Secrets are NOT in git
+(`.env`, `cookies.txt`, `workspace/` are ignored): they go straight from the Windows PC to the mini PC with `scp`.
 
-## The 3 commands (Git Bash on the Windows PC)
+## First install
+
+On the mini PC (`remi@remi-desktop`):
 
 ```bash
-tar -czf ~/tune-o-clip.tgz -C ~/Documents --exclude=.venv --exclude=output --exclude=ready_to_post --exclude=workspace --exclude=calibration_studio/runs --exclude=calibration_studio/.app_profile --exclude='tune-o-clip-(copy)' --exclude=__pycache__ tune-o-clip
-scp ~/tune-o-clip.tgz you@192.168.1.50:~/
-ssh -t you@192.168.1.50 'tar -xzf tune-o-clip.tgz && cd tune-o-clip && chmod +x setup_linux.sh start_linux.sh && ./setup_linux.sh'
+sudo apt install -y git gh openssh-server
+gh auth login            # GitHub.com -> HTTPS -> "Login with a web browser" (account Tune-0-Matic)
+gh repo clone Tune-0-Matic/tune-o-clip ~/tune-o-clip
 ```
 
-The archive includes your `.env` (Twitch keys) and `cookies.txt`; it leaves out the Windows `.venv`, all videos and
-the calibration runs (the taste profile and ratings in `calibration_studio/clip_rate/` do go along).
+On the Windows PC (Git Bash): copy the keys + cookies over SSH (use the mini PC's IP if the name doesn't resolve):
+
+```bash
+scp ~/Documents/tune-o-clip/.env ~/Documents/tune-o-clip/cookies.txt remi@remi-desktop.local:~/tune-o-clip/
+```
+
+Back on the mini PC:
+
+```bash
+cd ~/tune-o-clip && ./setup_linux.sh
+```
+
 `setup_linux.sh` asks for your sudo password, then sets up swap, packages, Ollama + models, the Python venv and the
 Whisper model, and prints a checklist. Running it again is safe.
 
-No network between the PCs? Copy `tune-o-clip.tgz` with a USB stick and run the third command's part in quotes in
-a terminal on the mini PC.
+## Updating
+
+Windows: commit + `git push`. Mini PC: `cd ~/tune-o-clip && git pull && ./setup_linux.sh` (then
+`systemctl --user restart tune-o-clip` if it runs as a service). `.env`, `workspace/` and videos are never touched.
 
 ## Running it
 
