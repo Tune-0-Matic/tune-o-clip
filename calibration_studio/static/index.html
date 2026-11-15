@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tune-O-Clip Studio</title>
+<style>
+  :root { --bg:#0e0f12; --panel:#16181d; --card:#1c1f26; --line:#2a2e37; --text:#e6e8ec; --dim:#8b92a0;
+          --accent:#ffb627; --good:#3ecf8e; --bad:#ff5c5c; --mid:#f5d04a; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, "Segoe UI", sans-serif;
+         display:flex; flex-direction:column; overflow:hidden; }
+  button { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px;
+           padding:5px 10px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--dim); }
+  button:disabled { opacity:.45; cursor:default; }
+  button[aria-pressed="true"], button.primary { background:var(--accent); color:#111; border-color:var(--accent); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  button:focus-visible, textarea:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  select, textarea, input { font:inherit; color:var(--text); background:var(--card); border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .card h2 { font-size:12px; letter-spacing:.07em; text-transform:uppercase; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .dim { color:var(--dim); font-size:12px; }
+  .err { color:var(--bad); }
+  kbd { background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:0 4px; font-size:11px; }
+  /* top bar */
+  #top { display:flex; align-items:center; gap:14px; padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
+  #top h1 { font-size:15px; margin:0; white-space:nowrap; }
+  #tabs { display:flex; gap:4px; }
+  #tabs button { border-radius:6px 6px 0 0; }
+  #top .spacer { flex:1; }
+  section.tab { flex:1; min-height:0; display:none; }
+  section.tab.on { display:grid; }
+  /* harvest */
+  #tab-harvest { grid-template-columns:330px 1fr; gap:12px; padding:12px; overflow:auto; align-content:start; }
+  #tab-harvest form { display:grid; gap:8px; align-content:start; }
+  #tab-harvest label { display:grid; gap:3px; color:var(--dim); font-size:12px; }
+  #channels { min-height:64px; resize:vertical; }
+  .bar { height:10px; background:var(--line); border-radius:5px; overflow:hidden; }
+  .bar div { height:100%; background:var(--good); width:0; transition:width .4s; }
+  .prog { display:grid; grid-template-columns:120px 1fr 90px; gap:8px; align-items:center; margin:6px 0; }
+  .pill { padding:3px 10px; border-radius:12px; background:var(--bg); border:1px solid var(--line); font-size:12px; }
+  .pill.full { border-color:var(--good); color:var(--good); }
+  #stages { display:flex; gap:4px; flex-wrap:wrap; margin:8px 0; }
+  #stages span { padding:3px 8px; border-radius:4px; background:var(--bg); color:var(--dim); font-size:12px; }
+  #stages span.done { color:var(--good); }
+  #stages span.now { background:var(--accent); color:#111; font-weight:600; }
+  #feed { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:10px; }
+  #feed figure { margin:0; }
+  #feed p { grid-column:1/-1; margin:0; }
+  #feed video { width:100%; aspect-ratio:9/16; background:#000; border-radius:6px; }
+  #feed figcaption { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #log { margin:0; max-height:220px; overflow:auto; font:12px/1.4 ui-monospace, Consolas, monospace; color:var(--dim); white-space:pre-wrap; }
+  #harvestRight { display:grid; gap:12px; align-content:start; min-width:0; }
+  /* review */
+  #tab-review { grid-template-columns:290px 1fr 400px; }
+  #side { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  #side header { padding:10px 12px; border-bottom:1px solid var(--line); display:grid; gap:8px; }
+  #rbar { height:4px; background:var(--line); border-radius:2px; overflow:hidden; }
+  #rbar div { height:100%; background:var(--good); width:0; }
+  #list { overflow-y:auto; flex:1; margin:0; padding:0; list-style:none; }
+  #list li button { width:100%; display:grid; grid-template-columns:48px 1fr auto; gap:8px; align-items:center; text-align:left;
+                    border:0; border-bottom:1px solid var(--line); border-radius:0; background:none; padding:6px 10px; }
+  #list li button[aria-current="true"] { background:var(--card); box-shadow:inset 3px 0 var(--accent); }
+  #list img, #list .noimg { width:48px; height:85px; object-fit:cover; border-radius:4px; background:#000; }
+  #list .t { overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; font-size:13px; }
+  .badge { font-size:12px; font-weight:600; padding:2px 6px; border-radius:10px; background:var(--line); white-space:nowrap; }
+  .ok { color:var(--good); }
+  #stage { display:flex; flex-direction:column; min-width:0; min-height:0; padding:12px; gap:10px; }
+  #title { font-size:16px; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #video { flex:1; min-height:0; width:100%; background:#000; border-radius:8px; }
+  #panel { background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:12px; display:grid; gap:12px; align-content:start; }
+  .pillars { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; text-align:center; margin-bottom:8px; }
+  .pillars div { background:var(--bg); border-radius:6px; padding:6px 2px; }
+  .pillars b { display:block; font-size:18px; }
+  .pillars span { font-size:11px; color:var(--dim); }
+  dl { display:grid; grid-template-columns:86px 1fr; gap:4px 8px; margin:0; font-size:13px; }
+  dt { color:var(--dim); }
+  dd { margin:0; overflow-wrap:anywhere; }
+  .reason { font-style:italic; margin:6px 0 8px; }
+  #transcript { max-height:96px; overflow:auto; font-size:12px; color:var(--dim); background:var(--bg); border-radius:6px; padding:6px 8px; margin-top:8px; }
+  #labels { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:10px; }
+  #labels button { text-align:left; font-size:13px; }
+  #pills { display:grid; grid-template-columns:repeat(10,1fr); gap:4px; }
+  #pills button { padding:6px 0; }
+  #tags { display:flex; flex-wrap:wrap; gap:6px; }
+  #tags button { font-size:12px; }
+  #panel label { display:block; color:var(--dim); font-size:12px; margin:10px 0 4px; }
+  #panel textarea { width:100%; min-height:58px; resize:vertical; }
+  /* tuner */
+  #tab-tune { grid-template-columns:minmax(380px, 460px) 1fr; gap:12px; padding:12px; overflow:auto; align-content:start; }
+  .slider { display:grid; grid-template-columns:150px 1fr 64px; gap:8px; align-items:center; margin:5px 0; }
+  .slider span { font-size:13px; }
+  .slider output { text-align:right; font-variant-numeric:tabular-nums; }
+  .slider.changed span { color:var(--accent); }
+  .group { margin:10px 0 2px; font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .big { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .big div { background:var(--bg); border-radius:8px; padding:10px; text-align:center; }
+  .big b { display:block; font-size:24px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  td button { padding:1px 8px; font-size:12px; }
+</style>
+</head>
+<body>
+<header id="top">
+  <h1>Tune-O-Clip Studio</h1>
+  <nav id="tabs" aria-label="Views">
+    <button data-tab="harvest">Harvest &amp; Render</button>
+    <button data-tab="review">Review</button>
+    <button data-tab="tune">Weight Tuner</button>
+  </nav>
+  <div class="spacer"></div>
+  <label class="dim" for="run">Run</label>
+  <select id="run"></select>
+  <button id="reload" title="Rebuild the run's clip list from disk">↻</button>
+</header>
+
+<!-- 1. HARVEST -->
+<section class="tab" id="tab-harvest">
+  <div class="card">
+    <h2>Start a run</h2>
+    <form id="newRun" onsubmit="return false">
+      <label>Twitch channels <textarea id="channels">caseoh_, ishowspeed, jynxzi, lospollostv</textarea></label>
+      <div class="row">
+        <label>Clips per channel <input id="per" type="number" min="1" max="200" value="20" style="width:90px"></label>
+        <label>Time window <select id="hours"><option value="24">24 h</option><option value="168" selected>168 h (7 d)</option><option value="720">720 h (30 d)</option></select></label>
+        <label>Min views <input id="views" type="number" min="0" value="500" style="width:90px"></label>
+      </div>
+      <p class="dim" style="margin:0">Short on clips? The window widens and the views limit drops by itself until each channel has its count.</p>
+      <button class="primary" id="btnStart">Start New Run</button>
+      <hr style="border:0;border-top:1px solid var(--line);width:100%">
+      <button id="btnResume">Resume Interrupted Run</button>
+      <p class="dim" style="margin:0">Continues the run picked at the top: only what is missing is downloaded and rendered.</p>
+      <button class="danger" id="btnStop">Stop</button>
+      <div id="hmsg" class="dim" role="status"></div>
+    </form>
+  </div>
+  <div id="harvestRight">
+    <div class="card">
+      <h2 id="hTitle">No run in progress</h2>
+      <div class="prog"><span>Harvested</span><div class="bar"><div id="bH"></div></div><span id="nH">–</span></div>
+      <div class="prog"><span>Rendered</span><div class="bar"><div id="bR"></div></div><span id="nR">–</span></div>
+      <div class="row dim"><span id="eta"></span><span id="elapsed"></span></div>
+      <div class="row" id="pillsS" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h2>Working on</h2>
+      <div id="cur" class="dim">Nothing right now.</div>
+      <div id="stages"></div>
+    </div>
+    <div class="card"><h2>New shorts (play them now)</h2><div id="feed"><p class="dim">Finished shorts appear here as they render.</p></div></div>
+    <div class="card"><h2>Log</h2><pre id="log"></pre></div>
+  </div>
+</section>
+
+<!-- 2. REVIEW -->
+<section class="tab" id="tab-review">
+  <nav id="side" aria-label="Clips">
+    <header>
+      <div class="row">
+        <select id="fStreamer" aria-label="Streamer filter"><option value="">All streamers</option></select>
+        <select id="fStatus" aria-label="Review status filter">
+          <option value="unreviewed">Unreviewed</option><option value="reviewed">Reviewed</option><option value="all" selected>All</option>
+        </select>
+      </div>
+      <div id="progress" class="dim">0 / 0 Reviewed</div>
+      <div id="rbar"><div></div></div>
+      <div class="row"><button id="export">Export Tuning Report</button></div>
+      <div id="exported" class="dim" role="status"></div>
+    </header>
+    <ul id="list"></ul>
+  </nav>
+  <main id="stage">
+    <div class="row">
+      <div id="title">Pick a run at the top.</div>
+      <button id="btnEdited" aria-pressed="true">Edited Short</button>
+      <button id="btnRaw" aria-pressed="false">Raw Clip <kbd>R</kbd></button>
+      <button id="btnLoop" aria-pressed="true">Loop</button>
+    </div>
+    <video id="video" controls loop playsinline preload="auto"></video>
+    <div class="dim"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> ±2 s · <kbd>↑</kbd><kbd>↓</kbd> or <kbd>P</kbd><kbd>N</kbd> prev/next ·
+      <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> = 10 · labels <kbd>K</kbd> <kbd>X</kbd> <kbd>W</kbd> <kbd>F</kbd> <kbd>D</kbd> · <kbd>R</kbd> raw/edited</div>
+  </main>
+  <aside id="panel">
+    <section class="card" aria-labelledby="whyH">
+      <h2 id="whyH">Why Tune-O-Clip did this</h2>
+      <div id="why"></div>
+      <div id="transcript"></div>
+    </section>
+    <section class="card" aria-labelledby="revH">
+      <h2 id="revH">Your review <span id="saved" class="dim" role="status"></span></h2>
+      <div id="labels" role="group" aria-label="Labels"></div>
+      <div id="pills" role="group" aria-label="Overall rating 1 to 10"></div>
+      <label>Quick issue tags</label>
+      <div id="tags" role="group" aria-label="Quick issue tags"></div>
+      <label for="liked">What I liked</label><textarea id="liked"></textarea>
+      <label for="disliked">What I didn't like</label><textarea id="disliked"></textarea>
+      <label for="notes">Extra notes</label><textarea id="notes"></textarea>
+    </section>
+  </aside>
+</section>
+
+<!-- 3. TUNER -->
+<section class="tab" id="tab-tune">
+  <div class="card">
+    <h2>Scoring weights (backend/scorer.py)</h2>
+    <div id="sliders"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="tReset">Back to saved</button>
+      <button id="tDefaults">Factory defaults</button>
+      <button class="primary" id="tSave">Save Weights to tune-o-clip</button>
+    </div>
+    <div id="tmsg" class="dim" role="status" style="margin-top:6px"></div>
+  </div>
+  <div style="display:grid;gap:12px;align-content:start;min-width:0">
+    <div class="card">
+      <h2>Against this run's judged clips</h2>
+      <div class="big">
+        <div><b id="kPass">–</b><span class="dim">pass the gate</span></div>
+        <div><b id="kDead">–</b><span class="dim">dead-air rejects</span></div>
+        <div><b id="kLow">–</b><span class="dim">below min score</span></div>
+        <div><b id="kNow">–</b><span class="dim">pass with saved weights</span></div>
+      </div>
+      <p class="dim" id="kNote"></p>
+    </div>
+    <div class="card">
+      <h2>Versus your labels (Keep / Cut, else rating ≥ 7 / ≤ 4)</h2>
+      <table><tr><th></th><th>gate passes</th><th>gate blocks</th></tr>
+        <tr><th>You: keep</th><td id="aKP" class="ok"></td><td id="aKB" class="err"></td></tr>
+        <tr><th>You: cut</th><td id="aCP" class="err"></td><td id="aCB" class="ok"></td></tr></table>
+    </div>
+    <div class="card">
+      <h2>Disagreements</h2>
+      <table id="mis"></table>
+      <div class="row" style="margin-top:10px"><button id="tExport">Export CLAUDE_TUNING_REPORT.md</button><span id="texp" class="dim"></span></div>
+      <p class="dim">Director archetype rules are code, not weights: label clips "Wrong Archetype" and export the report for Claude.</p>
+    </div>
+  </div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const api = async (path, body) => {
+  const res = await fetch(path, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+  const d = await res.json();
+  if (!res.ok) throw new Error(d.error || res.statusText);
+  return d;
+};
+const fmt = (s) => s == null ? "–" : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s` : `${Math.floor(s)}s`;
+const file = (rel) => `/files/${encodeURIComponent(batch)}/${rel}`;
+let batch = null, runs = [], tab = "harvest";
+
+// --- tabs + run picker ---
+function show(name) {
+  tab = name;
+  document.querySelectorAll("section.tab").forEach((s) => s.classList.toggle("on", s.id === "tab-" + name));
+  document.querySelectorAll("#tabs button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tab === name)));
+  history.replaceState(null, "", "#" + name);
+  if (name === "review" && batch && !clips.length) loadClips();
+  if (name === "tune") { if (batch && !clips.length) loadClips(); evaluate(); }
+  if (name !== "review") $("video").pause();
+}
+document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => show(b.dataset.tab));
+async function loadRuns(pick) {
+  const d = await api("/api/runs");
+  runs = d.runs;
+  $("run").replaceChildren(...runs.map((r) => el("option", { value: r.name, textContent: `${r.name}  (${r.clips} clips, ${r.shorts} shorts)` })));
+  batch = pick && runs.some((r) => r.name === pick) ? pick : batch && runs.some((r) => r.name === batch) ? batch : runs.length ? runs[0].name : null;
+  if (batch) $("run").value = batch;
+  $("btnResume").disabled = !batch;
+}
+$("run").onchange = () => { batch = $("run").value; clips = []; cur = null; loadClips(); };
+$("reload").onclick = async () => { await loadRuns(); loadClips(); };
+
+// --- 1. harvest ---
+const STAGES = ["Metadata", "Download", "Whisper", "Ollama Judge", "AI Director", "Render"];
+let feedKey = "", hState = null, wasRunning = false;
+$("btnStart").onclick = async () => {
+  try {
+    const d = await api("/api/harvest/start", { streamers: $("channels").value, per_streamer: +$("per").value,
+      hours: +$("hours").value, min_views: +$("views").value });
+    $("hmsg").textContent = `Started run ${d.batch}.`;
+    await loadRuns(d.batch);
+  } catch (e) { $("hmsg").textContent = e.message; }
+};
+$("btnResume").onclick = async () => {
+  try { await api("/api/harvest/start", { resume: true, batch }); $("hmsg").textContent = `Resuming ${batch}…`; }
+  catch (e) { $("hmsg").textContent = e.message; }
+};
+$("btnStop").onclick = async () => { await api("/api/harvest/stop", {}); $("hmsg").textContent = "Stopping… (Resume carries on later)"; };
+
+function paintHarvest(s) {
+  hState = s;
+  $("btnStop").disabled = !s.running;
+  $("btnStart").disabled = !!s.running;
+  $("btnResume").disabled = !!s.running || !batch;
+  if (!s.batch) return;
+  const c = s.counts;
+  $("hTitle").textContent = `${s.batch} · ${s.running ? s.phase : s.phase || "idle"}` + (s.exit && !s.running && s.phase === "failed" ? ` (exit ${s.exit}: see log)` : "");
+  $("bH").style.width = (100 * c.harvested / (c.target || 1)) + "%";
+  $("bR").style.width = (100 * c.rendered / (c.target || 1)) + "%";
+  $("nH").textContent = `${c.harvested} / ${c.target}`;
+  $("nR").textContent = `${c.rendered} / ${c.target}`;
+  $("eta").textContent = s.running ? `ETA ${s.eta_s == null ? "measuring…" : fmt(s.eta_s)}` : "";
+  $("elapsed").textContent = ` · running ${fmt(s.now - s.started)}` + (c.edited > c.rendered ? ` · ${c.edited - c.rendered} edit(s) without a short` : "");
+  $("pillsS").replaceChildren(...Object.entries(c.per_streamer).map(([k, n]) =>
+    el("span", { className: "pill" + (n >= c.per ? " full" : ""), textContent: `${k} ${Math.min(n, c.per)}/${c.per}` })));
+  const cu = s.current;
+  if (cu) {
+    $("cur").replaceChildren(el("div", { textContent: `${cu.streamer || "…"} · ${cu.title || cu.id}` }),
+      el("div", { className: "dim", textContent: `clip ${fmt(s.now - cu.since)} · this stage ${fmt(s.now - cu.stage_since)}` + (cu.n ? ` · render ${cu.n} of ${cu.of}` : "") }));
+    const at = STAGES.indexOf(cu.stage);
+    $("stages").replaceChildren(...STAGES.map((n, i) => el("span", { className: i < at ? "done" : i === at ? "now" : "",
+      textContent: n === "Render" && /nvenc/i.test(s.encoder || "") ? "NVENC Render" : n === "Whisper" ? "Whisper CUDA" : n })));
+  } else { $("cur").textContent = s.running ? "Starting…" : "Nothing right now."; $("stages").replaceChildren(); }
+  const key = s.feed.map((f) => f.id).join();
+  if (key !== feedKey) {  // rebuild only on change so playing videos keep going
+    feedKey = key;
+    $("feed").replaceChildren(...s.feed.filter((f) => f.short).map((f) => el("figure", {},
+      el("video", { src: `/files/${encodeURIComponent(s.batch)}/${f.short}`, controls: true, preload: "metadata", loop: true }),
+      el("figcaption", { textContent: f.title || f.id, title: f.title || f.id }))));
+    if (!s.feed.length) $("feed").replaceChildren(el("p", { className: "dim", textContent: "Finished shorts appear here as they render." }));
+  }
+  const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = s.log.join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+async function poll() {  // also the app's heartbeat: the server quits a minute after the window stops polling
+  try {
+    const s = await api("/api/harvest");
+    paintHarvest(s);
+    if (wasRunning && !s.running) { await loadRuns(); if (s.batch === batch) loadClips(); }
+    wasRunning = s.running;
+  } catch (e) { /* server restarting */ }
+}
+setInterval(poll, 1000);
+
+// --- 2. review ---
+let clips = [], reviews = {}, TAGS = [], LABELS = [], view = [], cur = null, raw = false, timer = null, pending = {};
+const LABEL_KEYS = { k: "Keep", x: "Cut / Boring", w: "Wrong Archetype", f: "Bad Edit / Framing", d: "Audio / Caption Drift" };
+const ai10 = (c) => c.clipper.judge_10 ?? Math.round((c.clipper.final_score || 0) * 100) / 10;
+const reviewed = (c) => { const r = reviews[c.id] || {}; return !!(r.rating || (r.labels || []).length); };
+const color = (v) => v >= 7 ? "var(--good)" : v >= 4 ? "var(--mid)" : "var(--bad)";
+
+async function loadClips() {
+  if (!batch) return;
+  flush();
+  const d = await api("/api/clips?batch=" + encodeURIComponent(batch));
+  ({ clips, reviews, tags: TAGS, labels: LABELS } = d);
+  const fs = $("fStreamer"), keep = fs.value;
+  fs.replaceChildren(el("option", { value: "", textContent: "All streamers" }),
+    ...[...new Set(clips.map((c) => c.streamer))].sort().map((s) => el("option", { value: s, textContent: s })));
+  fs.value = keep;
+  if (!$("pills").children.length) for (let i = 1; i <= 10; i++) $("pills").append(el("button", { textContent: i, onclick: () => setRating(i) }));
+  $("tags").replaceChildren(...TAGS.map((t) => el("button", { textContent: t, onclick: () => toggle("tags", t) })));
+  const keyOf = Object.fromEntries(Object.entries(LABEL_KEYS).map(([k, v]) => [v, k.toUpperCase()]));
+  $("labels").replaceChildren(...LABELS.map((t) => { const b = el("button", { onclick: () => toggle("labels", t) }, t + " ", el("kbd", { textContent: keyOf[t] })); b.dataset.v = t; return b; }));
+  render();
+  const again = cur && clips.find((c) => c.id === cur.id);
+  if (again) { cur = again; paintWhy(); paintForm(); } else if (view.length) select(view[0].id); else { cur = null; $("title").textContent = "No clips in this run yet."; $("video").removeAttribute("src"); }
+  if (tab === "tune") evaluate();
+}
+
+function render() {
+  const s = $("fStreamer").value, st = $("fStatus").value;
+  view = clips.filter((c) => (!s || c.streamer === s) && (st === "all" || (st === "reviewed") === reviewed(c)));
+  const n = clips.filter(reviewed).length;
+  $("progress").textContent = `${n} / ${clips.length} Reviewed`;
+  $("rbar").firstElementChild.style.width = (clips.length ? 100 * n / clips.length : 0) + "%";
+  $("list").replaceChildren(...view.map((c) => {
+    const r = reviews[c.id] || {};
+    const img = c.thumb ? el("img", { src: file(c.thumb), alt: "", loading: "lazy" }) : el("div", { className: "noimg" });
+    const badge = el("span", { className: "badge", textContent: "AI " + ai10(c), title: "AI judge score /10" });
+    badge.style.color = color(ai10(c));
+    const mine = [r.rating ? `you ${r.rating}` : "", ...(r.labels || []).map((l) => l.split(" ")[0])].filter(Boolean).join(" · ");
+    const b = el("button", { onclick: () => select(c.id) }, img,
+      el("div", {}, el("div", { className: "t", textContent: c.title || c.id }),
+         el("div", { className: "dim" }, c.streamer + (c.short ? "" : " · no short"), mine ? el("span", { className: "ok", textContent: " · " + mine }) : "")), badge);
+    b.setAttribute("aria-current", String(!!cur && cur.id === c.id));
+    return el("li", {}, b);
+  }));
+}
+
+function select(id) {
+  flush();
+  cur = clips.find((c) => c.id === id);
+  raw = !cur.short;
+  $("btnEdited").disabled = !cur.short;
+  $("title").textContent = cur.title || cur.id;
+  playSource();
+  const r = reviews[id] || {};
+  for (const k of ["liked", "disliked", "notes"]) $(k).value = r[k] || "";
+  paintForm(); paintWhy(); render();
+  const btn = $("list").querySelector('[aria-current="true"]');
+  if (btn) btn.scrollIntoView({ block: "nearest" });
+}
+function playSource() {
+  const v = $("video");
+  v.src = file(raw ? cur.raw : cur.short);
+  $("btnRaw").setAttribute("aria-pressed", String(raw));
+  $("btnEdited").setAttribute("aria-pressed", String(!raw));
+  if (tab === "review") v.play().catch(() => {});
+}
+function paintWhy() {
+  const c = cur.clipper, d = cur.editor, p = c.pillars || {};
+  const pill = (k, label) => el("div", {}, el("b", { textContent: p[k] ?? "–" }), el("span", { textContent: label }));
+  const list = (xs, f) => (xs || []).map(f).join(", ") || "none";
+  const qc = { edited: "PASS", qc_failed: "FAILED: " + d.note, skipped: "skipped: " + d.note, error: "crashed: " + d.note, not_edited: "not rendered yet" }[d.status];
+  const rows = [
+    ["AI judge", c.judge_10 == null ? "not run (Ollama offline)" : `${c.judge_10}/10${c.judge_reject ? " · REJECTED (kept: no gate)" : ""}`],
+    ["Final score", c.final_score], ["Views", `${c.views} (${c.views_per_min}/min)`],
+    ["Signals", `vocal burst ${(c.vocal_burst || 0).toFixed(2)} · visual ${(c.visual_action || 0).toFixed(2)}`],
+    ["Duration", `${(c.duration || 0).toFixed(1)} s`], ["QC", qc],
+  ];
+  if (d.scenario) rows.push(
+    ["Archetype", `${d.scenario} (${d.directed_by})`], ["Layout", d.layout],
+    ["Cuts", `${(d.cuts || []).length} cut(s), kept ${d.kept_sec} s, trimmed ${d.trimmed_sec} s: ` + list(d.cuts, (x) => `${x.start.toFixed(1)}–${x.end.toFixed(1)}`)],
+    ["Hook", d.hook_teaser && d.hook_teaser.enabled ? `teaser ${d.hook_teaser.start}–${d.hook_teaser.end} s` : "none"],
+    ["Zooms", list(d.zooms, (z) => `${z.style} ${z.scale}x @${z.at}s`)],
+    ["Effects", [...new Set((d.filters || []).map((f) => f.type))].join(", ") || "none"],
+    ["SFX", list(d.sfx, (s) => `${s.name} @${s.at}s`)],
+    ["Captions", `${d.font} · ${d.caption_tone}`], ["Title", d.title || ""]);
+  $("why").replaceChildren(
+    el("div", { className: "pillars" }, pill("comedy_payoff", "payoff"), pill("self_contained", "self-contained"),
+       pill("hook_strength", "hook"), pill("quotability", "quotable")),
+    el("div", { className: "reason", textContent: c.judge_reason ? `“${c.judge_reason}”` : "" }),
+    el("dl", {}, ...rows.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: String(v) })])));
+  $("transcript").textContent = cur.transcript ? "Whisper: " + cur.transcript : "No transcript.";
+}
+function paintForm() {
+  const r = reviews[cur.id] || {};
+  [...$("pills").children].forEach((b, i) => b.setAttribute("aria-pressed", String(r.rating === i + 1)));
+  [...$("tags").children].forEach((b) => b.setAttribute("aria-pressed", String((r.tags || []).includes(b.textContent))));
+  [...$("labels").children].forEach((b) => b.setAttribute("aria-pressed", String((r.labels || []).includes(b.dataset.v))));
+}
+// saving: every change goes to disk at once (text after a 400 ms pause, flushed on clip switch / unload)
+async function save(fields) {
+  const id = cur.id;
+  reviews[id] = { ...(reviews[id] || {}), ...fields };
+  $("saved").textContent = "saving…";
+  try { await api("/api/review", { batch, id, ...fields }); $("saved").textContent = "saved ✓"; }
+  catch (e) { $("saved").textContent = "NOT SAVED: " + e.message; }
+  render();
+}
+function setRating(n) { const r = reviews[cur.id] || {}; save({ rating: r.rating === n ? null : n }); paintForm(); }
+function toggle(key, t) {
+  const set = new Set((reviews[cur.id] || {})[key] || []);
+  if (set.has(t)) set.delete(t); else {
+    set.add(t);
+    if (t === "Keep") set.delete("Cut / Boring");
+    if (t === "Cut / Boring") set.delete("Keep");
+  }
+  save({ [key]: [...set] }); paintForm();
+}
+for (const k of ["liked", "disliked", "notes"]) $(k).addEventListener("input", () => {
+  pending[k] = $(k).value;
+  clearTimeout(timer); timer = setTimeout(flush, 400);
+});
+function flush() {
+  clearTimeout(timer);
+  if (cur && Object.keys(pending).length) { save(pending); pending = {}; }
+}
+addEventListener("beforeunload", () => {
+  if (cur && Object.keys(pending).length) navigator.sendBeacon("/api/review", JSON.stringify({ batch, id: cur.id, ...pending }));
+});
+function step(d) {
+  if (!view.length) return;
+  const i = view.findIndex((c) => c.id === (cur && cur.id));
+  select(view[Math.max(0, Math.min(view.length - 1, i + d))].id);
+}
+$("btnRaw").onclick = () => { if (cur && !raw) { raw = true; playSource(); } };
+$("btnEdited").onclick = () => { if (cur && raw && cur.short) { raw = false; playSource(); } };
+$("btnLoop").onclick = () => { const v = $("video"); v.loop = !v.loop; $("btnLoop").setAttribute("aria-pressed", String(v.loop)); };
+$("fStreamer").onchange = $("fStatus").onchange = render;
+const exportReport = async (out) => {
+  flush();
+  out.textContent = "Exporting…";
+  try { const d = await api("/api/export", { batch }); out.textContent = `Saved ${d.md}`; } catch (e) { out.textContent = "Export failed: " + e.message; }
+};
+$("export").onclick = () => exportReport($("exported"));
+document.addEventListener("keydown", (e) => {
+  if (tab !== "review" || e.target.matches("textarea, input, select") || e.ctrlKey || e.metaKey || e.altKey || !cur) return;
+  const v = $("video"), k = e.key.toLowerCase();
+  if (k === " ") v.paused ? v.play() : v.pause();
+  else if (k === "arrowleft") v.currentTime = Math.max(0, v.currentTime - 2);
+  else if (k === "arrowright") v.currentTime = Math.min(v.duration || 0, v.currentTime + 2);
+  else if (k === "arrowdown" || k === "n") step(1);
+  else if (k === "arrowup" || k === "p") step(-1);
+  else if (/^[0-9]$/.test(k)) setRating(k === "0" ? 10 : +k);
+  else if (LABEL_KEYS[k]) toggle("labels", LABEL_KEYS[k]);
+  else if (k === "r") { if (cur.short) { raw = !raw; playSource(); } }
+  else return;
+  e.preventDefault();  // keep Space/arrows from also scrolling or double-seeking the focused video
+}, true);
+
+// --- 3. tuner ---
+const SLIDERS = [
+  ["Judge pillars (weighted score)"],
+  ["PILLARS.self_contained", "Self-contained", 0, 1, 0.05], ["PILLARS.comedy_payoff", "Comedy payoff", 0, 1, 0.05],
+  ["PILLARS.hook_strength", "Hook strength", 0, 1, 0.05], ["PILLARS.quotability", "Quotability", 0, 1, 0.05],
+  ["Gate"],
+  ["min_score", "Min comedy score", 0, 10, 0.5],
+  ["MIN_PAYOFF", "Dead air: payoff <", 0, 10, 1], ["MIN_HOOK", "…and hook <", 0, 10, 1],
+  ["View boost (proven Twitch clips)"],
+  ["VIRAL_VIEWS", "Views needed", 0, 50000, 500], ["VIRAL_VOCAL", "Vocal burst needed", 0, 1, 0.05], ["VIRAL_BOOST", "Boost (0.05 = +0.5)", 0, 0.3, 0.01],
+  ["Final score (ranks YouTube candidates)"],
+  ["W_COMEDY", "Comedy", 0, 1, 0.05], ["W_SIGNAL", "Signal (replays/vocal)", 0, 1, 0.05], ["W_VISUAL", "Visual action", 0, 1, 0.05],
+];
+let saved = null, defaults = null, w = null, tTimer = null;
+const getW = (o, k) => k.startsWith("PILLARS.") ? o.weights.PILLARS[k.slice(8)] : k === "min_score" ? o.min_score : o.weights[k];
+function setW(k, v) { if (k.startsWith("PILLARS.")) w.weights.PILLARS[k.slice(8)] = v; else if (k === "min_score") w.min_score = v; else w.weights[k] = v; }
+function buildSliders() {
+  $("sliders").replaceChildren(...SLIDERS.map(([k, label, lo, hi, st]) => {
+    if (!label) return el("div", { className: "group", textContent: k });
+    const out = el("output");
+    const inp = el("input", { type: "range", min: lo, max: hi, step: st, oninput: () => { setW(k, +inp.value); paintSliders(); clearTimeout(tTimer); tTimer = setTimeout(evaluate, 150); } });
+    inp.setAttribute("aria-label", label);
+    const row = el("label", { className: "slider" }, el("span", { textContent: label }), inp, out);
+    row.dataset.k = k;
+    return row;
+  }));
+}
+function paintSliders() {
+  document.querySelectorAll(".slider").forEach((row) => {
+    const k = row.dataset.k, v = getW(w, k);
+    row.querySelector("input").value = v;
+    row.querySelector("output").textContent = Math.round(v * 1000) / 1000;
+    row.classList.toggle("changed", v !== getW(saved, k));
+  });
+}
+async function loadWeights() {
+  const d = await api("/api/weights");
+  saved = { weights: d.weights, min_score: d.min_score };
+  defaults = { weights: d.defaults, min_score: d.min_score };
+  w = structuredClone(saved);
+  if (!$("sliders").children.length) buildSliders();
+  paintSliders();
+}
+async function evaluate() {
+  if (!batch || !w) return;
+  try {
+    const d = await api("/api/tune", { batch, weights: w.weights, min_score: w.min_score });
+    $("kPass").textContent = `${d.new.pass}/${d.new.total}`;
+    $("kDead").textContent = d.new.dead_air; $("kLow").textContent = d.new.below_min; $("kNow").textContent = `${d.now.pass}/${d.now.total}`;
+    $("kNote").textContent = `${d.new.judged} of ${d.new.total} clips were judged by Ollama (unjudged ones always pass). `
+      + (d.flips.length ? `${d.flips.length} clip(s) change fate vs the saved weights. ` : "")
+      + (Math.abs(d.pillar_sum - 1) > 0.001 ? `Pillar weights add up to ${d.pillar_sum}, not 1: scores scale with it.` : "");
+    const a = d.agree;
+    $("aKP").textContent = a.keep_pass; $("aKB").textContent = a.keep_blocked; $("aCP").textContent = a.cut_pass; $("aCB").textContent = a.cut_blocked;
+    $("mis").replaceChildren(el("tr", {}, ...["Clip", "You", "AI", "Gate", ""].map((t) => el("th", { textContent: t }))),
+      ...d.mismatches.map((m) => el("tr", {}, el("td", { textContent: `${m.streamer}: ${m.title || m.id}` }), el("td", { textContent: m.you }),
+        el("td", { textContent: m.ai ?? "–" }), el("td", { textContent: m.why }),
+        el("td", {}, el("button", { textContent: "Watch", onclick: () => { show("review"); select(m.id); } })))));
+    if (!d.mismatches.length) $("mis").append(el("tr", {}, el("td", { className: "dim", textContent: "None (label some clips in Review first)." })));
+  } catch (e) { $("kNote").textContent = e.message; }
+}
+$("tReset").onclick = () => { w = structuredClone(saved); paintSliders(); evaluate(); };
+$("tDefaults").onclick = () => { w = structuredClone(defaults); w.min_score = saved.min_score; paintSliders(); evaluate(); };
+$("tSave").onclick = async () => {
+  try {
+    const d = await api("/api/weights/save", { weights: w.weights, min_score: w.min_score });
+    $("tmsg").textContent = `Saved to ${d.file} (${Object.keys(d.saved).length} change(s) from defaults) + Min Comedy Score in workspace/settings.json. `
+      + "New clips use it from the next run. Close the Godot panel first or it may write its own Min Comedy Score back.";
+    await loadWeights(); evaluate();
+  } catch (e) { $("tmsg").textContent = "Not saved: " + e.message; }
+};
+$("tExport").onclick = () => exportReport($("texp"));
+
+// --- start ---
+(async () => {
+  await loadRuns();
+  await loadWeights();
+  show(["harvest", "review", "tune"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "harvest");
+  if (batch) loadClips();
+  poll();
+})();
+</script>
+</body>
+</html>
