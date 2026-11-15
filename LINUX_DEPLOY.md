@@ -39,12 +39,15 @@ set to this repo), `.env` + a visible copy `env.txt`, and `cookies.txt`. Downloa
 
 ```bash
 unzip -oq ~/Downloads/tune-o-clip-bundle.zip -d ~
-cd ~/tune-o-clip && git status -s
-./setup_linux.sh
+cd ~/tune-o-clip && ./setup_linux.sh
+sudo apt install -y gh && gh auth login && git pull
 ```
 
+The third line logs this machine into GitHub once (`gh auth login`: GitHub.com, HTTPS, "Login with a web browser",
+yes to "Authenticate Git"), after which `git pull` updates it.
+
 The bundle contains your keys and YouTube login cookies: keep it private on Drive (never "anyone with the link") and
-delete it from Downloads once installed. For `git pull` later, log in once: `sudo apt install -y gh && gh auth login`.
+delete it from Downloads once installed.
 
 ## Updating
 
