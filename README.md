@@ -209,11 +209,15 @@ python backend/clipper.py URL --auto-edit                    # single runs too
      libx264 veryfast crf 21. SETTINGS caption theme = one active-word colour.
    - `emotional_story` profile (the judge's own short tone call, `scorer.ollama_tone`: any strong feeling, sad,
      nostalgic, wholesome, grateful, proud, inspiring..., strength >= 8; such clips pass Min Comedy Score on that
-     alone): no snap zooms / shakes / pitch drop / whoosh / thud / speed-up / teaser, cuts padded 0.15 s and joined
-     with 0.3 s crossfades, a cool (sad family) or warm (wholesome family) grade with `eq=saturation=0.78:contrast=1.06`
-     + vignette, a slow 1.0 -> 1.07x push-in, a generated ambient piano / pad loop (`assets/music/sad_ambient.wav` or
-     `warm_ambient.wav`, your own file of that name wins) at -25 dB with fades + ducking, and calm sentence-case
-     captions (`editor/pycaps_style_story/`) in the lower third. The hype_chaos edit is unchanged.
+     alone), matched to a measured reference Short: no snap zooms / shakes / pitch drop / whoosh / thud / speed-up /
+     teaser; the same tight VAD hard cuts; a muted 8 x 0.45 s flash montage of the strong moments before the final
+     line (stories >= 20 s with >= 2 strong moments); a punchy grade (`eq=contrast=1.10:saturation=1.18`, teal
+     shadows, light vignette) + a slow 1.0 -> 1.07x push-in; a generated ambient piano / pad loop
+     (`assets/music/sad_ambient.wav` / `warm_ambient.wav`, your own file of that name wins) at -19 dBFS in the speech
+     gaps (mixed after the voice's loudnorm, ducked under speech); bold 2-line uppercase captions at 52% whose second
+     line is italic with a glowing accent (red sad / yellow warm / cyan otherwise; Archivo Black + Black Italic
+     bundled in `editor/pycaps_style_story/`, SIL OFL). The panel shows [HYPE] / [STORY] on every clip card. The
+     hype_chaos edit is unchanged.
 5. **QC** (`qc.py`): > 500 KB, 1080x1920, 7.0-58.5 s, mean volume -20..-10 dBFS, no black > 0.3 s. On failure the
    EDL is repaired (black spans stripped, teaser dropped / front trimmed when too long) and re-rendered, up to 2 times.
 

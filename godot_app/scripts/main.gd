@@ -1949,6 +1949,15 @@ func _clip_file(e: Dictionary) -> String:
 	return str(e.path).get_base_dir().path_join(str(e.clip.get("file", "")))
 
 
+func profile_badge(clip: Dictionary) -> String:
+	## The editing profile the judge's tone call picked (manifest "tone"): [STORY · emotion] = the emotional_story edit,
+	## [HYPE] = the hype_chaos edit (also every clip judged before tones existed)
+	if str(clip.get("tone", "")) == "emotional_story":
+		var emotion := str(clip.get("emotion", ""))
+		return "[STORY%s]" % ("" if emotion in ["", "<null>"] else " · " + emotion)
+	return "[HYPE]"
+
+
 func _clip_row(e: Dictionary) -> Control:
 	var clip: Dictionary = e.clip
 	var file := _clip_file(e)
@@ -1956,7 +1965,7 @@ func _clip_row(e: Dictionary) -> Control:
 	panel.theme_type_variation = &"ClipRow"
 	var box := VBoxContainer.new()
 	panel.add_child(box)
-	var head := _label("#%d   %s   %s - %s   SCORE %.2f   %s" % [int(clip.get("clip_id", 0)),
+	var head := _label("%s  #%d   %s   %s - %s   SCORE %.2f   %s" % [profile_badge(clip), int(clip.get("clip_id", 0)),
 			str(e.data.get("title", e.data.get("video_id", ""))).left(40),
 			_clock(float(clip.get("start_sec", 0))), _clock(float(clip.get("end_sec", 0))),
 			float(clip.get("score", 0)), str(clip.get("reason", ""))])

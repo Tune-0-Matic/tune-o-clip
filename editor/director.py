@@ -4,7 +4,8 @@ Local Ollama only picks the *creative* fields (title, hashtags, banner); the exa
 teaser are computed deterministically from Whisper word timings and the audio energy curve, so the EDL is always
 frame-sane and the Ollama-offline fallback is the same code path. Retention effects (retention_fx): facecam snap
 zooms + whoosh, yell shake + thud, the punchline's pitch drop; zooms / shake only on split_stack's webcam panel
-(the gameplay never moves). pycaps (editor/captions.py) owns the caption animation.
+(the gameplay never moves). emotional_story clips (story_profile) get none of that, and a flash montage instead.
+pycaps (editor/captions.py) owns the caption animation.
 
 All times in the EDL are SOURCE-clip seconds; the renderer maps them onto the edited timeline.
 """
@@ -416,21 +417,68 @@ def direct(words, audio, duration, sr=16000, model=None, meta=None, framing=None
                directed_by="ollama" if ai else "heuristic", scenario_fit=(ai or {}).get("fit"))
     edl["bg_music"]["enabled"] = bool(music)
     if (meta or {}).get("tone") == "emotional_story":  # scorer.ollama_tone: any strong feeling, not only sad
-        story_profile(edl, duration, (meta or {}).get("emotion"))
+        story_profile(edl, duration, (meta or {}).get("emotion"), words, env)
     return edl
 
 
-STORY_PAD = 0.15  # more air around every cut: the renderer's 0.3 s crossfades land in the pause, not on a word
+MONTAGE_MIN_LEN, MONTAGE_FLASH, MONTAGE_N = 20.0, 0.45, 8  # stories >= 20 s; 8 x 0.45 s = a 3.6 s flash montage
+STRONG = 0.6  # an energy peak >= 60% of the clip's loudest is a strong moment
 
 
-def story_profile(edl, duration, emotion=None):
-    """The emotional_story edit: no snap zooms, shakes, pitch drop, whoosh / thud, speed-up or cold-open teaser (the
-    hype_chaos edit stays exactly as it was); the renderer adds the grade, the slow push-in, the crossfades, the
-    ambient bed and the calm captions. Cuts get STORY_PAD more air each side (pieces that then touch merge)."""
+def final_line_start(kept):
+    """Source start of the last line: the words after the last sentence end / pause > GAP. None if there is no break."""
+    for prev, nxt in zip(reversed(kept[:-1]), reversed(kept[1:])):
+        if prev["word"].rstrip()[-1:] in ".!?" or nxt["start"] - prev["end"] > GAP:
+            return nxt["start"]
+    return None
+
+
+def flash_montage(cuts, words, env, hop=HOP):
+    """The reference Short's climax recap: {"at": the final line's start, "clips": [(s, e)]} or None. Only for stories
+    with >= MONTAGE_MIN_LEN s of cuts, a final line in their second half and >= 2 strong moments before it. Flashes:
+    the strong moments first, then even picks across the kept cuts before the line, MONTAGE_N in all, >= 0.6 s apart,
+    in story order (the renderer mutes their voice: the bed carries them)."""
+    spans = [(c["start"], c["end"]) for c in cuts]
+    length = total(spans)
+    if length < MONTAGE_MIN_LEN or length + MONTAGE_N * MONTAGE_FLASH > MAX_LEN or not len(env):
+        return None
+    inside = lambda t: any(s <= t <= e for s, e in spans)
+    kept = [w for w in words if inside((w["start"] + w["end"]) / 2)]
+    at = final_line_start(kept)
+    if at is None or at < spans[0][0] + 0.5 * (spans[-1][1] - spans[0][0]):
+        return None
+    strong = [q for q in peaks(env, hop, limit=12) if env_at(env, q, hop) >= STRONG and inside(q) and q < at - 0.5]
+    if len(strong) < 2:
+        return None
+    before = [(s, min(e, at)) for s, e in spans if s < at]
+    pre = total(before)
+    even = []
+    for i in range(MONTAGE_N):  # evenly spread over the kept story before the final line
+        x = (i + 0.5) / MONTAGE_N * pre
+        for s, e in before:
+            if x <= e - s:
+                even.append(s + x)
+                break
+            x -= e - s
+    picks = []
+    for t in strong + even:
+        if len(picks) < MONTAGE_N and all(abs(t - q) >= 0.6 for q in picks):
+            picks.append(t)
+    return {"at": round(at, 2), "clips": [(round(max(0.0, t - 0.2), 2), round(max(0.0, t - 0.2) + MONTAGE_FLASH, 2)) for t in sorted(picks)]}
+
+
+def story_profile(edl, duration, emotion=None, words=(), env=None):
+    """The emotional_story edit (matched to a measured reference Short): no snap zooms, shakes, pitch drop, whoosh /
+    thud, speed-up or cold-open teaser; the same tight VAD hard cuts as the hype edit (it stays exactly as it was);
+    a flash montage before the final line when flash_montage() finds one. The renderer adds the grade, the slow
+    push-in, the ambient bed and the 2-line accent captions."""
     edl.update(profile="emotional_story", emotion=emotion, zooms=[], shakes=[], sfx=[], speed=[])
     edl.pop("pitch", None)
     edl["hook_teaser"]["enabled"] = False
-    edl["cuts"] = [{"start": round(s, 2), "end": round(e, 2)} for s, e in
-                   merge([(max(0.0, c["start"] - STORY_PAD), min(duration, c["end"] + STORY_PAD)) for c in edl["cuts"]])]
+    m = flash_montage(edl["cuts"], words, env) if env is not None else None
+    if m:  # the montage goes in between two cuts: split the one the final line starts in
+        edl["cuts"] = [{"start": s, "end": e} for c in edl["cuts"] for s, e in
+                       ([(c["start"], m["at"]), (m["at"], c["end"])] if c["start"] < m["at"] < c["end"] else [(c["start"], c["end"])])]
+        edl["montage"] = m
     edl["bg_music"]["enabled"] = True  # the renderer's own ambient bed (assets/music/<bed>.wav, generated if missing)
     return edl

@@ -34,9 +34,19 @@ def main(argv):
     b.with_layout_options(SubtitleLayoutOptions(**dict(layout, vertical_align={"align": "center", "offset": y - 0.5})))
     b.with_resources(str(Path(pycaps.__file__).parent / "template" / "preset" / preset / "resources"))  # the font ships with pycaps
     b.with_custom_subtitle_renderer(PictexSubtitleRenderer())
-    if len(argv) > 5:  # SETTINGS caption theme: one colour for every active word (pop only)
+    if len(argv) > 5 and style == STYLES["story"][0]:  # the emphasis line's accent colour + its glow ring
+        b.add_css_content(accent_css(argv[5]))
+    elif len(argv) > 5:  # SETTINGS caption theme: one colour for every active word (pop only)
         b.add_css_content(f".word-being-narrated, .hype.word-being-narrated {{ color: {argv[5]}; }}")
     b.build().run()
+
+
+def accent_css(color):
+    """#RRGGBB -> the story style's .last-line-in-segment colour + a glow ring of hard shadows in that colour."""
+    r, g, b = (int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    ring = ", ".join(f"{x}px {y}px 0 rgba({r},{g},{b},0.38)" for x, y in ((-2.2, 0), (2.2, 0), (0, -2.2), (0, 2.2)))
+    return (f".last-line-in-segment {{ color: {color}; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, "
+            f"1px 1px 0 #000, {ring}, 1.5px 2px 0 rgba(0,0,0,0.6); }}\n")
 
 
 if __name__ == "__main__":

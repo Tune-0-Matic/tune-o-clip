@@ -280,7 +280,9 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     if music_gain_db is not None and edl.get("profile") != "emotional_story":  # the story bed keeps its own level
         edl["bg_music"]["gain_db"] = float(music_gain_db)
     if edl.get("profile") == "emotional_story":
-        emit("log", msg=f"Emotional story ({edl.get('emotion') or 'feeling'}): calm edit, no zooms / SFX, ambient bed")
+        m = edl.get("montage")
+        emit("log", msg=f"Emotional story ({edl.get('emotion') or 'feeling'}): punchy grade, no zooms / SFX, ambient bed"
+                        + (f", {len(m['clips'])}-flash montage before the final line" if m else ", no montage (needs >= 20 s + 2 strong moments)"))
     del audio
     if edl.get("skip_render"):  # nothing coherent left to post: don't spend a render on it
         emit("log", msg=f"Skipped {stem}: {edl['skip_reason']}")

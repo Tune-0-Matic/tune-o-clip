@@ -365,7 +365,7 @@ https://www.youtube.com/playlist?list=PL1
 	var rows: Array[Node] = main.clip_list.get_children()
 	var head_of := func(row: Node) -> String: return (row.get_child(0).get_child(0) as Label).text
 	assert(rows.size() == 3 and main.clip_count.text == "CLIPS: 3", "all manifests aggregated: %d %s" % [rows.size(), main.clip_count.text])
-	assert(head_of.call(rows[0]).begins_with("#1   Newest Video") and head_of.call(rows[2]).begins_with("#1   Older Video"), "newest first")
+	assert(head_of.call(rows[0]).begins_with("[HYPE]  #1   Newest Video") and head_of.call(rows[2]).begins_with("[HYPE]  #1   Older Video"), "newest first")
 	assert(main.log_view.get_parsed_text().contains("[CUTTING] Cutting clip 1/2"), "stage logged")
 	assert(head_of.call(rows[1]).contains("00:14:05 - 00:14:32") and head_of.call(rows[1]).contains("Story Callback: [1:12-1:20] -> [14:05-14:32]"), str(head_of.call(rows[1])))
 
@@ -962,5 +962,14 @@ https://www.youtube.com/playlist?list=PL1
 	main.apply_telemetry({"gpu": {"util": 10.0, "used": 1186.0, "total": 4096.0, "temp": 59.0}, "cpu": 33.0})  # OFF: local again
 	assert((main.gauges["VRAM"].label as Label).text == "VRAM 1186 / 4096 MB" and not main.disk_label.text.contains("(Pod)"), main.disk_label.text)
 	assert(main.stats_label.text.contains("($0.00)") and not main.stats_label.text.contains("qwen2.5:14b"), main.stats_label.text)
+	# profile badge on every clip card: the judge's tone call -> [STORY · emotion] / [HYPE]
+	assert(main.profile_badge({"tone": "emotional_story", "emotion": "nostalgic"}) == "[STORY · nostalgic]")
+	assert(main.profile_badge({"tone": "emotional_story", "emotion": null}) == "[STORY]")
+	assert(main.profile_badge({"tone": "hype_chaos"}) == "[HYPE]" and main.profile_badge({}) == "[HYPE]", "older clips: hype")
+	var row: Control = main._clip_row({"clip": {"clip_id": 3, "tone": "emotional_story", "emotion": "proud"},
+			"data": {"title": "t"}, "path": "", "mtime": 0})
+	var head_text: String = (row.get_child(0).get_child(0) as Label).text
+	assert(head_text.begins_with("[STORY · proud]  #3"), head_text)
+	row.free()
 	print("test_main ok")
 	quit(0)

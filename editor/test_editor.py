@@ -459,68 +459,90 @@ src_words = [{"word": "hey", "start": 0.5, "end": 0.8}, {"word": "NO", "start": 
 doc = renderer.caption_doc(two, src_words, out_words=[{"word": "hey", "start": 0.52, "end": 0.8}, {"word": "no", "start": 2.51, "end": 2.8}])
 assert [sg["start"] for sg in doc["segments"]] == [0.52, 2.51], doc
 
-# --- emotional_story profile: calm edit; the hype_chaos edit stays exactly as it was ------------------------------
+# --- emotional_story profile (reference-matched); the hype_chaos edit stays exactly as it was ------------------------
 hype = director.direct(roast_w, roast_a, dur, framing=CAM)
 story_edl = director.direct(roast_w, roast_a, dur, framing=CAM, meta={"tone": "emotional_story", "emotion": "nostalgic"})
 assert hype.get("profile") is None and hype["zooms"] and hype["sfx"] and hype.get("pitch"), "hype untouched"
 assert story_edl["profile"] == "emotional_story" and story_edl["emotion"] == "nostalgic"
 assert story_edl["zooms"] == [] and story_edl["shakes"] == [] and story_edl["sfx"] == [] and "pitch" not in story_edl
 assert story_edl["speed"] == [] and not story_edl["hook_teaser"]["enabled"] and story_edl["bg_music"]["enabled"]
-padded = [(c["start"], c["end"]) for c in story_edl["cuts"]]
-assert all(b - a > 0.05 for (_, a), (b, _) in zip(padded, padded[1:])), "padded cuts that touch are merged"
-assert all(any(ps <= c["start"] and c["end"] <= pe for ps, pe in padded) for c in hype["cuts"]), "every hype cut kept, with more air"
+assert story_edl["cuts"] == hype["cuts"] and "montage" not in story_edl, "same tight hard cuts; a 20 s clip's 13 s edit: no montage"
 assert director.direct(roast_w, roast_a, dur, meta={"tone": "hype_chaos"}).get("profile") is None
-# crossfades: the timeline is XFADE shorter per join; a piece too short to give up head + tail gets a shorter fade
-xf_edl = {"profile": "emotional_story", "cuts": [{"start": 0, "end": 4}, {"start": 6, "end": 10}, {"start": 12, "end": 15}],
-          "hook_teaser": {"enabled": False}}
-segs_xf, len_xf = renderer.timeline(xf_edl)
-assert abs(len_xf - (11 - 2 * renderer.XFADE)) < 1e-9 and [round(o, 3) for _, _, o, _, _ in segs_xf] == [0.0, 3.7, 7.4], segs_xf
-assert renderer.timeline(dict(xf_edl, profile=None))[1] == 11, "hype: plain concat, no overlap"
-assert renderer.xfade_len(xf_edl, [(0, 0.5, 1), (1, 3, 1)]) == 0.2 and renderer.xfade_len(xf_edl, [(0, 4, 1)]) == 0.0
-xg = ";".join(renderer.cut_graph(segs_xf, 0.3))
-assert "[v0][v1]xfade=transition=fade:duration=0.300:offset=3.700[vx1]" in xg and "[vx1][v2]xfade=transition=fade:duration=0.300:offset=7.400[vc]" in xg
-assert "[ax1][a2]acrossfade=d=0.300[ac]" in xg and "concat=" not in xg and ",fps=30,settb=AVTB[v0]" in xg, xg
-# calm captions: sentence case, up to 5 words a line
-sdoc = renderer.caption_doc(dict(xf_edl, profile="emotional_story"), words_at([("Hey", 1.0), ("chat,", 1.3), ("you", 1.6), ("ready", 1.9), ("to", 2.2), ("go?", 2.5)], 0.25))
-assert [w["word"] for w in sdoc["segments"][0]["words"]] == ["Hey", "chat,", "you", "ready", "to"], sdoc
-assert renderer.caption_doc(dict(xf_edl, profile=None), words_at([("Hey", 1.0)]))["segments"][0]["words"][0]["word"] == "HEY"
-# the graph: grade + push-in + xfade + the ambient bed at -25 dB with fades + ducking; no hype effects at all
+# flash montage: a >= 20 s story with >= 2 strong moments gets 8 x 0.45 s flashes (voice muted) before its final line
+m_dur = 40.0
+m_words = words_at([(w, 0.5 + i * 0.7) for i, w in enumerate(("i used to think about this every single night honestly " * 4).split())]
+                   + [("and", 33.0), ("i", 33.3), ("never", 33.6), ("told", 34.0), ("you", 34.4), ("that.", 34.7),
+                      ("thank", 36.5), ("you.", 36.9)])
+m_audio = tone_audio(m_dur, [(5.0, 0.4, 0.8), (14.0, 0.4, 0.9), (24.0, 0.4, 0.85), (34.0, 0.4, 0.95)])
+m_env = director.energy(m_audio)
+m_cuts = [{"start": 0.3, "end": 37.4}]
+mt = director.flash_montage(m_cuts, m_words, m_env)
+assert mt and mt["at"] == 36.5, mt  # the final line "thank you." starts after the last sentence end
+assert len(mt["clips"]) == director.MONTAGE_N and all(round(e - s, 2) == director.MONTAGE_FLASH for s, e in mt["clips"]), mt
+assert [s for s, _ in mt["clips"]] == sorted(s for s, _ in mt["clips"]) and all(e <= mt["at"] for _, e in mt["clips"])
+assert any(abs(s + 0.2 - 14.0) < 0.2 for s, _ in mt["clips"]) and any(abs(s + 0.2 - 24.0) < 0.2 for s, _ in mt["clips"]), "strong moments first"
+assert director.flash_montage([{"start": 0.3, "end": 15.0}], m_words, m_env) is None, "< 20 s: no montage"
+assert director.flash_montage(m_cuts, m_words, director.energy(tone_audio(m_dur, [(34.0, 0.4, 0.95)]))) is None, "one moment"
+ms = director.story_profile({"cuts": [dict(c) for c in m_cuts], "hook_teaser": {"enabled": False}, "bg_music": {"enabled": False}},
+                            m_dur, "grateful", m_words, m_env)
+assert ms["cuts"] == [{"start": 0.3, "end": 36.5}, {"start": 36.5, "end": 37.4}], ms["cuts"]  # split where the montage goes in
+segs_m, len_m = renderer.timeline(ms)
+assert [k for _, _, _, k, _ in segs_m] == [False] + ["montage"] * 8 + [False] and abs(len_m - (37.1 + 8 * 0.45)) < 1e-6, segs_m
+assert abs(renderer.to_out(37.0, segs_m) - (36.2 + 3.6 + 0.5)) < 1e-6, "the final line plays after the montage"
+mg = ";".join(renderer.cut_graph(segs_m))
+assert mg.count(",volume=0[a") == 8 and "xfade" not in mg and "concat=n=10" in mg, "flash pieces: picture only, hard cuts"
+assert all(w["word"] != "THANK" or w["start"] > 36.2 for sg in renderer.caption_doc(ms, m_words)["segments"] for w in sg["words"])
+# captions: bold uppercase lines of up to 6 words (pycaps sets them as 2 lines), the accent by emotion
+sdoc = renderer.caption_doc(dict(story_edl), words_at([("Hey", 1.0), ("chat,", 1.3), ("you", 1.6), ("ready", 1.9), ("to", 2.2), ("go?", 2.5)], 0.25))
+assert [w["word"] for w in sdoc["segments"][0]["words"]] == ["HEY", "CHAT,", "YOU", "READY", "TO", "GO?"], sdoc
+assert {renderer.story_tint({"emotion": e}) for e in ("proud", "sad", "nostalgic")} == {"warm", "sad", "cool"}
+assert renderer.STORY_ACCENT == {"warm": "#FFD60A", "sad": "#FF3B3B", "cool": "#3DE8FF"} and renderer.CAPTION_Y["story"] == 0.52
+import captions  # noqa: E402
+assert "rgba(255,214,10,0.38)" in captions.accent_css("#FFD60A") and ".last-line-in-segment" in captions.accent_css("#FFD60A")
+# the graph: punchy grade + push-in, the bed after the voice's loudnorm at -19 dBFS (gain from its own RMS), ducked
 music_tmp = tmp / "music"
 bed = renderer.ensure_story_bed("sad_ambient", music_tmp)
 with wave.open(str(bed)) as f:
     assert f.getframerate() == 48000 and abs(f.getnframes() / 48000 - 16.0) < 0.01
 assert renderer.user_music(music_tmp) == [], "the story beds never become the hype edit's music"
 (music_tmp / "mine.mp3").write_bytes(b"x")
-assert [m.name for m in renderer.user_music(music_tmp)] == ["mine.mp3"]
+assert [m.name for m in renderer.user_music(music_tmp)] == ["mine.mp3"] and renderer.rms_dbfs(music_tmp / "mine.mp3") is None
 (music_tmp / "mine.mp3").unlink()
 story_real = dict(real, profile="emotional_story", emotion="nostalgic", layout="blur_fill", zooms=[], shakes=[], sfx=[], speed=[],
                   hook_teaser={"enabled": False}, bg_music={"enabled": True, "gain_db": -22})
 story_real.pop("pitch")
 sc = renderer.build_command(src, story_real, tmp / "story.mp4", renderer.probe(src), music_dir=music_tmp)
 sg = sc[sc.index("-filter_complex") + 1]
-for needle in ("xfade=transition=fade", "acrossfade=d=", "eq=saturation=0.78:contrast=1.06", "colorbalance=rs=-0.04", "vignette=PI/5",
-               "scale=w='2*trunc(540*(1+0.07*t/", ":eval=frame,crop=1080:1920", "volume=-25.0dB,afade=t=in:d=1.5,afade=t=out:st=",
-               "sidechaincompress"):
+gain = renderer.STORY_BED_DBFS - renderer.rms_dbfs(bed)
+for needle in ("eq=contrast=1.10:saturation=1.18", "colorbalance=rs=-0.05:gs=0.02:bs=0.07", "vignette=PI/6",
+               "scale=w='2*trunc(540*(1+0.07*t/", ":eval=frame,crop=1080:1920", "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,asplit=2[vn][side]",
+               f"volume={gain:.1f}dB,afade=t=in", "[mu][side]sidechaincompress", "[vn][duck]amix=inputs=2:normalize=0:duration=first,alimiter"):
     assert needle in sg, needle
-for needle in ("zoompan", "asetrate", "adelay", "crop=w=iw-12"):
-    assert needle not in sg, needle  # zero snap zooms / pitch drops / SFX / shakes
-assert str(bed) in sc, "the generated sad bed"
+for needle in ("zoompan", "asetrate", "adelay", "crop=w=iw-12", "xfade", "saturation=0.78"):
+    assert needle not in sg, needle  # zero snap zooms / pitch drops / SFX / shakes / fades / washed-out grade
+assert str(bed) in sc
 warm = renderer.build_command(src, dict(story_real, emotion="proud"), tmp / "w.mp4", renderer.probe(src), music_dir=music_tmp)
-wg = warm[warm.index("-filter_complex") + 1]
-assert "eq=saturation=0.85" in wg and "colorbalance=rs=0.05" in wg and str(music_tmp / "warm_ambient.wav") in warm, "proud: warm grade + major bed"
+assert str(music_tmp / "warm_ambient.wav") in warm, "proud: the major bed"
 hype_graph = renderer.build_command(src, real, tmp / "x.mp4", renderer.probe(src), facecam=cam)
 hg = hype_graph[hype_graph.index("-filter_complex") + 1]
-assert "xfade" not in hg and "eq=saturation" not in hg and "eval=frame" not in hg and "concat=n=" in hg, "hype graph unchanged"
-# for real: ffmpeg runs the xfade chain, the length matches the timeline, and pycaps burns the calm style
+assert "eq=contrast=1.10" not in hg and "eval=frame" not in hg and "alimiter" not in hg and "volume=0[a" not in hg, "hype graph unchanged"
+# for real: renders, the bed sits at ~-19 dBFS where nobody talks, and pycaps burns the 2-line accent style
+quiet_src = tmp / "quiet_mid.mp4"  # speech-like tone with a 3 s gap in the middle: the bed alone there
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=12", "-f", "lavfi", "-i",
+                "aevalsrc='0.3*sin(2*PI*220*t)*(lt(t,4.5)+gt(t,7.5))':s=48000:d=12", "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac", "-shortest", str(quiet_src)], check=True)
+gap_edl = dict(story_real, cuts=[{"start": 0.0, "end": 12.0}])
 with quiet():
-    final_s, rep_s = pipeline.render_until_pass(src, story_real, spoken, tmp / "story_work", {"max_dur": 30.0, "min_dur": 5.0},
-                                                renderer.detect_encoder())
-assert rep_s["ok"] and abs(rep_s["duration"] - renderer.timeline(final_s)[1]) < 0.2, (rep_s, renderer.timeline(final_s)[1])
-story_cmd = [str(x) for x in json.loads((tmp / "story_work" / "ffmpeg_cmd.json").read_text())]
-assert any("xfade" in x for x in story_cmd)
-assert json.loads((tmp / "story_work" / "captions.json").read_text())["segments"][0]["words"][0]["word"] == "this", "sentence case burned"
-cut_s = renderer.cut_audio(src, story_real, tmp / "story_cut.wav")
-assert abs(len(pipeline.clipper.decode_audio(cut_s)) / 16000 - renderer.timeline(story_real)[1]) < 0.2, "Whisper hears the crossfaded cut"
+    final_s, rep_s = pipeline.render_until_pass(quiet_src, gap_edl, words_at([("so", 1.0), ("i", 2.0), ("remember", 3.0), ("it", 9.0)]),
+                                                tmp / "story_work", {"max_dur": 30.0, "min_dur": 5.0}, renderer.detect_encoder())
+assert rep_s["ok"], rep_s
+pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(tmp / "story_work" / "short.mp4"), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                     capture_output=True).stdout
+x = np.frombuffer(pcm, np.int16).astype(np.float64) / 32768
+gap_db = 20 * np.log10(np.sqrt(np.mean(x[int(5.3 * 16000):int(7.0 * 16000)] ** 2)) + 1e-9)
+assert -22.5 <= gap_db <= -16.5, ("the bed in the speech gap", gap_db)
+burned_s = json.loads((tmp / "story_work" / "captions.json").read_text())
+assert burned_s["segments"][0]["words"][0]["word"] == "SO", burned_s
 
 # editor defaults read from settings.json
 (tmp / "settings.json").write_text(json.dumps({"caption_theme": "Cyan", "music_gain_db": -24, "facecam_box": "auto"}))
