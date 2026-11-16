@@ -276,6 +276,8 @@ assert saved["twitch_a0_1"]["tags"] == ["Cut too soon", "Banger / nailed it"] an
 assert saved[rejected_id]["labels"] == ["Keep", "Wrong Archetype"]  # canonical order
 
 # tuner: the gate re-run with scorer's own functions; saved weights untouched until Save
+assert (scorer.DEFAULTS["MIN_PAYOFF"], scorer.DEFAULTS["MIN_HOOK"]) == (0, 0), "the dead-air floor is off by default"
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5  # a tuned floor, as if weights.json had set it
 w = jget("/api/weights")
 assert w["weights"]["MIN_PAYOFF"] == 5 and w["min_score"] == 0 and w["defaults"]["PILLARS"]["comedy_payoff"] == 0.35
 judged_reject = {e["id"] for e in log if e["clipper"]["judge_reject"]}  # fake pillars: payoff 2 / hook 4 = dead air
@@ -292,7 +294,7 @@ assert req("/api/tune", {"batch": "b1", "weights": dict(looser, MIN_HOOK=-1)})[0
 assert req("/api/tune", {"batch": "b1", "weights": dict(looser, PILLARS={"comedy_payoff": 1})})[0] == 400
 assert not scorer.WEIGHTS_FILE.exists()
 code, _, body = req("/api/weights/save", {"weights": looser, "min_score": 6.5})
-assert code == 200 and json.loads(scorer.WEIGHTS_FILE.read_text()) == {"MIN_HOOK": 4} and scorer.MIN_HOOK == 4
+assert code == 200 and json.loads(scorer.WEIGHTS_FILE.read_text()) == {"MIN_PAYOFF": 5, "MIN_HOOK": 4} and scorer.MIN_HOOK == 4
 assert json.loads(rs.SETTINGS.read_text()) == {"min_score": 6.5, "clips": 4}, "other panel settings kept"
 assert jget("/api/weights")["weights"]["MIN_HOOK"] == 4 and jget("/api/weights")["min_score"] == 6.5
 assert req("/api/weights/save", {"weights": looser, "min_score": 11})[0] == 400

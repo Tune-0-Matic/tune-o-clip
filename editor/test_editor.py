@@ -564,6 +564,17 @@ assert len(times) > 25 and all(b - a >= 0.05 for a, b in times), times  # ass_ti
 assert all(b1 <= a2 for (_, b1), (a2, _) in zip(times, times[1:])), "overlapping captions with a teaser"
 assert sum(a < 2.0 for a, _ in times) >= 3, "teaser words captioned at the start"
 
+# captions from Whisper on the cut audio: its times are used as they are, the tone comes from the source word under it
+cut_wav = renderer.cut_audio(src, real, tmp / "cut.wav")
+cut_len = len(pipeline.clipper.decode_audio(cut_wav)) / 16000
+assert abs(cut_len - renderer.main_length(renderer.timeline(real)[0])) < 0.15, (cut_len, renderer.timeline(real))
+two = {"cuts": [{"start": 0, "end": 2}, {"start": 5, "end": 7}], "hook_teaser": {"enabled": False}, "word_tones": ["punch", "rage"]}
+src_words = [{"word": "hey", "start": 0.5, "end": 0.8}, {"word": "NO", "start": 5.5, "end": 5.8}]
+renderer.write_ass(two, src_words, tmp / "o.ass", out_words=[{"word": "hey", "start": 0.52, "end": 0.8}, {"word": "no", "start": 2.51, "end": 2.8}])
+ev = [l for l in (tmp / "o.ass").read_text(encoding="utf-8").splitlines() if l.startswith("Dialogue: 0,")]
+assert [round(secs(l.split(",")[1]), 2) for l in ev] == [0.52, 2.51], ev
+assert "Impact" in ev[1] and "Impact" not in ev[0], "the rage tone of the source word at 5.5 s"
+
 # SETTINGS caption theme: every highlighted word gets the one colour; editor defaults read from settings.json
 renderer.write_ass(dict(dense_edl, caption_tone="hype"), dense, tmp / "c.ass")
 colours = set(re.findall(r"\\c(&H[0-9A-F]{8}&)", (tmp / "c.ass").read_text(encoding="utf-8"))) - {"&H00FFFFFF&"}

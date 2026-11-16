@@ -10,10 +10,11 @@ const LED_COLORS := {"IDLE": Color("5c636a"), "RUNNING": Color("3ddc84"), "STUCK
 		"ERROR": Color("ef4444"), "DONE": Color("38bdf8")}
 const STUCK_MS := 90_000  # no stdout line for this long (outside a known sleep) = probably hung
 
+const GTA6 := "Grand Theft Auto VI"  # the Twitch category name (SETTINGS > TWITCH POLLING preset)
 const SOURCE_MODES := ["Single YouTube URL", "Batch URLs", "Twitch Streamers", "Twitch VOD Chat Spikes"]
 const OLLAMA_MODEL := "richardyoung/qwen2.5-3b-instruct-abliterated"
 const DEFAULT_SETTINGS := {
-	"clips": 4, "min_length": 15, "max_length": 55, "min_score": 6.0, "cleanup_source": false,
+	"clips": 4, "min_length": 15, "max_length": 55, "min_score": 3.5, "cleanup_source": false,
 	"twitch_streamers": "", "twitch_game": "", "twitch_min_views": 1500, "twitch_hours": 24, "twitch_limit": 20, "twitch_per_streamer": 0, "twitch_lang": "en",
 	"auto_edit": true, "facecam_box": "auto", "caption_theme": "Auto by Scenario", "music_gain_db": -24.0,
 	"cookies": "OFF", "whisper_model": "small.en", "ollama_model": OLLAMA_MODEL,
@@ -635,7 +636,9 @@ func _set_busy(on: bool) -> void:
 
 
 func _start(args: PackedStringArray) -> void:
-	args = cloud_args(args)  # RunPod ON + ready: the same run happens on the Pod, its shorts are pulled back here
+	var cloud := cloud_args(args)  # RunPod ON + ready: the same run happens on the Pod, its shorts are pulled back here
+	_cloud_run = cloud != args
+	args = cloud
 	# blocking pipes: non-blocking ones read EOF instantly. Linux: setsid gives the run its own session (same pid,
 	# setsid execs in place), so closing the panel can stop its clipper / ffmpeg / yt-dlp children too.
 	var proc := OS.execute_with_pipe("setsid", PackedStringArray([_python()]) + args) if OS.get_name() == "Linux" \
@@ -838,10 +841,29 @@ func _make_settings(categories: Array, extra_column: Control = null) -> PanelCon
 			grid.add_child(w)
 			_widgets[key] = w
 			_show_setting(key)
+		if cat[0] == "TWITCH POLLING":
+			var preset := Button.new()
+			preset.text = "GTA VI LAUNCH PRESET"
+			preset.tooltip_text = "Game Filter = %s, Streamer Logins cleared, Twitch mode: START pulls the game's top clips across all of Twitch." % GTA6
+			preset.pressed.connect(gta6_preset)
+			col.add_child(preset)
 		cols.add_child(col)
 	if extra_column:
 		cols.add_child(extra_column)
 	return panel
+
+
+## 1 click on launch day: the game's top clips across ALL of Twitch. Any Streamer Logins would only filter those
+## channels by the game, so they're cleared (logged; workspace/twitch_channels.txt still lists them).
+func gta6_preset() -> void:
+	if not str(settings.twitch_streamers).strip_edges().is_empty():
+		_log("[PRESET] Streamer Logins cleared (were: %s; still saved in workspace/twitch_channels.txt)." % settings.twitch_streamers, AMBER)
+	set_setting("twitch_streamers", "")
+	set_setting("twitch_game", GTA6)
+	_show_setting("twitch_streamers")
+	_show_setting("twitch_game")
+	set_mode(2)
+	_log("[PRESET] Twitch mode, Game Filter = %s: click START for its top clips across all streamers." % GTA6, GOOD)
 
 
 ## AUTO POST's last column: the one-time logins and POST BEST NOW.
@@ -1431,8 +1453,7 @@ func telemetry_end(ok: bool, now_ms: int = -1) -> void:
 	_finish_step(now_ms)
 	_overall_end_ms = now_ms
 	_task_name = "Done" if ok else "Ended with errors"
-	if ok:
-		_set_progress(1.0, true)
+	_set_progress(1.0 if ok else 0.0, true)  # never left at the last stage's 95%
 	telemetry_tick(now_ms)
 	refresh_stats()
 	save_eta()
@@ -2516,6 +2537,7 @@ var _gpu_selected := "NVIDIA RTX 4000 Ada Generation"
 var _cloud_type := "ALL"
 var _balance: Variant = null
 var _idle_min := 10.0
+var _cloud_run := false  # the current run streams from the Pod (stop_cloud_run)
 var _min_vram_gb := 16.0  # runpod_manager.MIN_VRAM_GB: the 14B model + Whisper large need it
 var _cloud_hw := {}  # the Pod's last hardware sample while RunPod is ready ({} = this PC)
 var _gpu_picked := false  # a row clicked this session: a catalog refresh still carrying .env's old choice can't undo it
@@ -2666,6 +2688,14 @@ func cloud_ready() -> bool:
 	return bool(load_cloud_state().get("ready", false))
 
 
+## The Pod is gone (watchdog, spend cap, console, OFF): a run streaming from it would only end when SSH's keepalive
+## gives up (~90 s), so end it now; on_run_ended then resets the LED and the progress bar.
+func stop_cloud_run() -> void:
+	if _cloud_run and _thread != null and _pid != -1 and OS.is_process_running(_pid):
+		_log("[RUNPOD] The Pod is gone: stopping the run that was waiting on it.", AMBER)
+		OS.kill(_pid)
+
+
 ## A run while the Pod is ready: runpod_manager.py run -- <script + args> (it streams the same JSON lines back).
 func cloud_args(args: PackedStringArray) -> PackedStringArray:
 	if not cloud_ready() or args.size() < 2:
@@ -2770,6 +2800,7 @@ func _on_cloud_line(line: String) -> void:
 			cloud_banner.visible = false
 			_cloud_hw = {}  # the sidebar goes back to this PC (gauges refresh on the next 2 s sample)
 			refresh_stats()
+			stop_cloud_run()
 		"key", "env":
 			pass
 		"diag":  # Test Deploy (no cost): console only, the status label stays as it is

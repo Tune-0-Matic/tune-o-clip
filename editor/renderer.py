@@ -105,11 +105,13 @@ def chunk(words, size=3, span=1.3, gap=0.35):
     return groups
 
 
-def write_ass(edl, words, path):
+def write_ass(edl, words, path, out_words=None):
     """The ONE caption track (none when the source has its own burned in: edl["source_captions"]). Kinetic captions: 1-3 word lines that pop in with a scale bounce, uppercase heavy font (per scenario;
     Impact on screams), 8 px outline + 4 px shadow, centre-lower at MarginV 660 (clear of the split-stack seam and
     the platform's title / subscribe UI: raised from 540 after batch 1). No teaser banner: the yellow bar on top was
-    disliked twice in batch 1. Neutral words white; the active word coloured by its tone (yellow / green / red / cyan)."""
+    disliked twice in batch 1. Neutral words white; the active word coloured by its tone (yellow / green / red / cyan).
+    out_words: Whisper words of the cut audio itself (cut_audio), already in output time: used as they are, only the
+    tone comes from the director's source word under them. Without them, source `words` are mapped through the cuts."""
     segs, _ = timeline(edl)
     tones = edl.get("word_tones") or []
     font = edl.get("font") or "Arial Black"
@@ -121,10 +123,19 @@ def write_ass(edl, words, path):
              f"Style: Pop,{font},100,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,1,0,1,4,3,2,140,140,660,1",
              "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
     events = []  # (start, end, text) for the caption track
+    def tone_at(src_t):  # the director's tone for the source word nearest a source moment
+        i = min(range(len(words)), key=lambda k: abs((words[k]["start"] + words[k]["end"]) / 2 - src_t), default=None)
+        return tones[i] if i is not None and i < len(tones) else "punch"
+
     for s, e, o, _, sp in segs:
-        seg_words = [dict(w, ostart=o + (max(w["start"], s) - s) / sp, oend=o + (min(w["end"], e) - s) / sp,
-                          tone=tones[i] if i < len(tones) else "punch")
-                     for i, w in enumerate(words) if w["end"] > s and w["start"] < e and clean(w["word"])]
+        if out_words is None:
+            seg_words = [dict(w, ostart=o + (max(w["start"], s) - s) / sp, oend=o + (min(w["end"], e) - s) / sp,
+                              tone=tones[i] if i < len(tones) else "punch")
+                         for i, w in enumerate(words) if w["end"] > s and w["start"] < e and clean(w["word"])]
+        else:
+            oe = o + (e - s) / sp
+            seg_words = [dict(w, ostart=max(w["start"], o), oend=min(w["end"], oe), tone=tone_at(s + ((w["start"] + w["end"]) / 2 - o) * sp))
+                         for w in out_words if o <= (w["start"] + w["end"]) / 2 < oe and clean(w["word"])]
         if edl.get("caption_tone"):  # SETTINGS caption theme overrides the per-word tones
             seg_words = [dict(w, tone=edl["caption_tone"]) for w in seg_words]
         for group in chunk(seg_words):
@@ -347,19 +358,38 @@ def panel_fx(edl, segs, w, h, fps, zoom=True):
     return ("," + ",".join(chain)) if chain else ""
 
 
-def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=None, sfx_dir=SFX_DIR, music_dir=MUSIC_DIR):
-    """-> ffmpeg argv (run with cwd=workdir, where subs.ass is written)."""
-    _, gargs, vf_tail, codec = encoder or detect_encoder()
-    segs, _ = timeline(edl)
-    fps = 30  # the platforms play 30; 60 doubled every per-frame filter (zoompan, shake, captions) for nothing
+def cut_graph(segs):
+    """The cuts as filtergraph lines -> [vc][ac]. concat stretches each piece to its longer stream (video trims land on
+    whole frames), so the real timeline drifts a little from timeline()'s ideal one over many cuts."""
     n = len(segs)
-    write_ass(edl, words, Path(workdir) / "subs.ass")
-    inputs = ["-i", str(src)]
     fc = [f"[0:v]split={n}" + "".join(f"[vs{i}]" for i in range(n)), f"[0:a]asplit={n}" + "".join(f"[as{i}]" for i in range(n))]
     for i, (s, e, _, _, sp) in enumerate(segs):
         fc.append(f"[vs{i}]trim=start={s:.3f}:end={e:.3f},setpts=(PTS-STARTPTS)/{sp:.4f}[v{i}]")
         fc.append(f"[as{i}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS" + (f",atempo={sp:.4f}" if sp != 1 else "") + f"[a{i}]")
     fc.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[vc][ac]")
+    return fc
+
+
+def cut_audio(src, edl, out):
+    """The render's own speech track (cuts, teaser and speed ramps; no SFX / music / loudnorm) as a 16 kHz mono WAV
+    for Whisper. The video runs through the same trims to a null output so concat pads exactly as in the render."""
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-filter_complex", ";".join(cut_graph(timeline(edl)[0])),
+           "-map", "[ac]", "-ac", "1", "-ar", "16000", str(out), "-map", "[vc]", "-f", "null", "-"]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if p.returncode != 0:
+        raise RuntimeError("ffmpeg cut audio failed:\n" + p.stderr.strip()[-800:])
+    return Path(out)
+
+
+def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=None, sfx_dir=SFX_DIR, music_dir=MUSIC_DIR,
+                  out_words=None):
+    """-> ffmpeg argv (run with cwd=workdir, where subs.ass is written)."""
+    _, gargs, vf_tail, codec = encoder or detect_encoder()
+    segs, _ = timeline(edl)
+    fps = 30  # the platforms play 30; 60 doubled every per-frame filter (zoompan, shake, captions) for nothing
+    write_ass(edl, words, Path(workdir) / "subs.ass", out_words)
+    inputs = ["-i", str(src)]
+    fc = cut_graph(segs)
     freeze = float(edl.get("freeze_end") or 0)
     v, a = "[vc]", "[ac]"
     if freeze > 0:
@@ -447,14 +477,14 @@ def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=Non
             "-r", str(fps), *codec, *threads[2:], "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
 
 
-def render(src, edl, words, out, workdir, encoder=None, facecam=None):
+def render(src, edl, words, out, workdir, encoder=None, facecam=None, out_words=None):
     """Render one short; returns the output path. Raises RuntimeError with ffmpeg's error on failure."""
     Path(workdir).mkdir(parents=True, exist_ok=True)
     info = probe(src)
     if not info["has_audio"]:
         raise RuntimeError(f"{src} has no audio track")
     ensure_sfx()
-    cmd = build_command(Path(src).resolve(), edl, words, Path(out).resolve(), workdir, info, encoder, facecam)
+    cmd = build_command(Path(src).resolve(), edl, words, Path(out).resolve(), workdir, info, encoder, facecam, out_words=out_words)
     (Path(workdir) / "ffmpeg_cmd.json").write_text(json.dumps(cmd, indent=1), encoding="utf-8")  # for debugging a bad render
     p = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:

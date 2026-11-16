@@ -223,6 +223,15 @@ https://www.youtube.com/playlist?list=PL1
 	targs = main.build_twitch_args("", "Grand Theft Auto VI")
 	assert(targs[targs.find("--poll-twitch-game") + 1] == "Grand Theft Auto VI" and not targs.has("--poll-twitch-channels"), "game only")
 	assert(main.build_twitch_args(" , ", "").is_empty(), "nothing to poll")
+	# GTA VI preset: game across all of Twitch (a saved streamer list would only filter those channels), Twitch mode
+	main.set_setting("twitch_streamers", "xqc")
+	main.gta6_preset()
+	assert(main.settings.twitch_streamers == "" and main.settings.twitch_game == "Grand Theft Auto VI" and main.mode_opt.selected == 2)
+	assert((main._widgets.twitch_game as LineEdit).text == "Grand Theft Auto VI", "the field shows it")
+	targs = main.build_twitch_args(str(main.settings.twitch_streamers), str(main.settings.twitch_game))
+	assert(targs[targs.find("--poll-twitch-game") + 1] == "Grand Theft Auto VI" and not targs.has("--poll-twitch-channels"), str(targs))
+	main.set_setting("twitch_game", "")
+	main.set_mode(0)
 	assert(main.parse_logins(FileAccess.get_file_as_string(main.twitch_channels_path)) == PackedStringArray(["xqc"]), "reload")
 	# auto-edit: on by default for queue runs, off -> flag dropped
 	assert(main.settings.auto_edit and main.build_batch_args("https://youtu.be/AAAAAAAAAAA").has("--auto-edit"), "auto-edit default on")
@@ -766,6 +775,29 @@ https://www.youtube.com/playlist?list=PL1
 	assert(main.progress_bar.value == 100.0 and main.task_label.text == "Done")
 	main.telemetry_tick(tt0 + 500_000)
 	assert(main.timer_label.text == "Task: 0s (ETA ~0s)   Overall: 1:30 (ETA ~0s)", "timers + ETAs freeze when the run ends: " + main.timer_label.text)
+	# a run that ends badly (e.g. the Pod vanished during the 5th of 5 shorts) never leaves the bar at 95%
+	main.telemetry_begin(tt0 + 600_000)
+	main.track_task({"event": "stage", "stage": "edit", "msg": "Editing short 5/5"}, tt0 + 601_000)
+	assert(is_equal_approx(main.progress_bar.value, 95.0), str(main.progress_bar.value))
+	main.telemetry_end(false, tt0 + 602_000)
+	assert(main.progress_bar.value == 0.0 and main.task_label.text == "Ended with errors", str(main.progress_bar.value))
+	# the Pod is gone: a cloud run still streaming from it is stopped at once (not after SSH's ~90 s keepalive)
+	var sleeper := OS.create_process(OS.get_executable_path(), PackedStringArray(["--headless", "--quit-after", "600"]))
+	main._pid = sleeper
+	main._thread = Thread.new()
+	main._cloud_run = false
+	main.stop_cloud_run()
+	assert(OS.is_process_running(sleeper), "a local run is never killed by a Pod status")
+	main._cloud_run = true
+	main._on_cloud_line(JSON.stringify({"event": "runpod", "stage": "off", "msg": "Pod abc is gone (terminated by its watchdog or in the RunPod console): $0.00/hr"}))
+	var pod_wait := 0
+	while OS.is_process_running(sleeper) and pod_wait < 50:
+		OS.delay_msec(100)
+		pod_wait += 1
+	assert(not OS.is_process_running(sleeper), "the cloud run was stopped when the Pod went off")
+	main._thread = null
+	main._pid = -1
+	main._cloud_run = false
 
 	# --- telemetry: hardware gauges + session stats ---------------------------------------------------------------
 	assert(main.gauge_color(69.9) == Color("5ad06a") and main.gauge_color(70) == Color("e0a030")

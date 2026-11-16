@@ -673,6 +673,16 @@ def rewrite_paths(folder, root=ROOT):
             f.write_text(t.replace(REMOTE, local), encoding="utf-8")
 
 
+def job_command(mapped, mark):
+    """The Pod-side shell line for one run. BUSY pauses the watchdog's idle rule; a heartbeat also touches ACTIVITY
+    every 30 s while this shell lives, so a long CPU render stays "active" even if another run's exit trap removed
+    BUSY. The heartbeat ends by itself within 30 s of the shell (kill -0 $$) and holds no SSH fds, so a dropped
+    session can't keep a Pod alive forever."""
+    return (f". /root/toc_env.sh && cd {REMOTE} && touch {BUSY} {mark} && trap 'rm -f {BUSY}; touch {ACTIVITY}' EXIT || exit 1; "
+            f"(while kill -0 $$ 2>/dev/null; do touch {ACTIVITY}; sleep 30; done) </dev/null >/dev/null 2>&1 & "
+            f"python3 -u {shlex.join(mapped)}")
+
+
 def run_remote(args, state_path=STATE, root=ROOT, popen=subprocess.Popen, run=subprocess.run, clock=time.time):
     state = load_state(state_path)
     if not state.get("ready"):
@@ -685,10 +695,8 @@ def run_remote(args, state_path=STATE, root=ROOT, popen=subprocess.Popen, run=su
     state.update(busy=True, last_activity=clock())
     save_state(state, state_path)
     emit("run", f"Running on the RunPod {state.get('gpu')}...")
-    cmd = (f". /root/toc_env.sh && cd {REMOTE} && touch {BUSY} {mark} && trap 'rm -f {BUSY}; touch {ACTIVITY}' EXIT"
-           f" && python3 -u {shlex.join(mapped)}")
     try:
-        p = popen(ssh_cmd(state, cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        p = popen(ssh_cmd(state, job_command(mapped, mark)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                   errors="replace")
         for line in p.stdout:
             print(line, end="", flush=True)

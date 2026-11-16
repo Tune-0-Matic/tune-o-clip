@@ -204,15 +204,25 @@ def boost_loudness(path):
     os.replace(tmp, path)
 
 
-def render_until_pass(src, edl, words, work, limits=None, encoder=None, facecam=None, max_retries=2, label="short"):
+def render_until_pass(src, edl, words, work, limits=None, encoder=None, facecam=None, max_retries=2, label="short",
+                      caption_words=None):
     """Render -> QC -> repair EDL -> re-render, up to max_retries repairs. -> (final edl, last QC report);
-    the render is work/short.mp4. A too_quiet render first gets up to LOUDNESS_PASSES audio-only loudnorm passes."""
+    the render is work/short.mp4. A too_quiet render first gets up to LOUDNESS_PASSES audio-only loudnorm passes.
+    caption_words(wav) -> words: captions come from Whisper on each attempt's own cut audio (0 drift from the cuts);
+    if that fails, the source words are mapped through the cuts as before."""
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     for attempt in range(max_retries + 1):
         (work / "edl.json").write_text(json.dumps(edl, indent=2), encoding="utf-8")
+        out_words = None
+        if caption_words and not edl.get("source_captions"):  # no captions of ours: nothing to time
+            emit("stage", stage="edit", msg="Whisper on the cut audio (caption timing)")
+            try:
+                out_words = caption_words(renderer.cut_audio(src, edl, work / "cut.wav"))
+            except Exception as e:  # captions still render, from the mapped source words
+                emit("log", msg=f"Caption re-timing skipped ({str(e).splitlines()[0][:160]}): using mapped word times")
         emit("stage", stage="render", msg=f"Rendering {label}" + (f" (repair {attempt})" if attempt else ""))
-        renderer.render(src, edl, words, work / "short.mp4", work, encoder=encoder, facecam=facecam)
+        renderer.render(src, edl, words, work / "short.mp4", work, encoder=encoder, facecam=facecam, out_words=out_words)
         # keep_dark (set by repair): the source itself is dark there, so blackdetect would only re-flag the content
         check = lambda: qc.check(work / "short.mp4", **{**(limits or {}), **({"black_max": 1e6} if edl.get("keep_dark") else {})})
         report = check()
@@ -278,7 +288,12 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
 
     work = out_dir / ".work" / stem
     make_room_for_render()
-    edl, report = render_until_pass(src, edl, words, work, limits, encoder, facecam, max_retries, stem)
+    def caption_words(wav):  # same Whisper, vocab fixes and onset snap as the source words, on the cut audio
+        a = clipper.decode_audio(wav)
+        return snap_words_to_audio(scorer.fix_gaming_words((transcribe or transcribe_words)(a, whisper_model, device), context),
+                                   director.energy(a))
+
+    edl, report = render_until_pass(src, edl, words, work, limits, encoder, facecam, max_retries, stem, caption_words)
     if not report["ok"]:
         emit("error", msg=f"{stem} failed QC ({', '.join(report['problems'])}); render kept in {work}")
         return {"ok": False, "qc": report, "edl": edl, "work": str(work)}

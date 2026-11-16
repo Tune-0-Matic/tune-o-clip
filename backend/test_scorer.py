@@ -158,6 +158,7 @@ judge_in = [{"signal": 0.9, "visual": 0.1, "vocal": 0.2, "transcript": "so yeah 
              "start_sec": 100.0, "lines": [(99.8, 101.5, "WAIT he's back"), (104.0, 106.0, "in the purple dinosaur suit")]},
             {"signal": 0.4, "visual": 0.0, "transcript": "menu"},
             {"signal": 0.6, "visual": 0.2, "transcript": "watch this trick shot it's going to be insane"}]
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5  # the dead-air floor as the Weight Tuner can set it (default 0, 0 = off)
 verdict = scorer.ollama_judge(judge_in, "m")
 judge_calls = [b for b in sent if b["prompt"].startswith(scorer.JUDGE_PROMPT)]
 assert len(judge_calls) == 4 and len(sent) == 5, len(sent)  # one call per clip + one callback call
@@ -204,6 +205,15 @@ dead = verdict_for(5, 2, hs=2)
 assert dead["reject"], dead  # menus / dead air
 assert not verdict_for(9, 4)["reject"] and not verdict_for(3, 3, hs=6)["reject"]  # a hook alone is not dead air
 assert verdict_for(9, 4, hs=4)["reject"]
+# the default: no floor, so a jokeless gameplay clip (3/3/3/3 = 4.5 with boosts) is judged by Min Comedy Score alone
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = scorer.DEFAULTS["MIN_PAYOFF"], scorer.DEFAULTS["MIN_HOOK"]
+assert (scorer.MIN_PAYOFF, scorer.MIN_HOOK) == (0, 0)
+gameplay = verdict_for(3, 3, hs=3, q=3)
+assert not gameplay["reject"] and not verdict_for(0, 0, hs=0)["reject"], gameplay
+g = dict(cue=0, signal=0.5, visual=0, start_sec=0, end_sec=45, reason="Twitch clip")
+scorer.apply_verdict(g, gameplay)
+assert scorer.passes_gate(g, 3.0) and not scorer.passes_gate(g, 5.0) and "(rejected)" not in g["reason"], g
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5
 urllib.request.urlopen = real_urlopen
 
 # viral boost: a proven Twitch banger (>= 3000 views + a vocal burst) gets half a point; a quiet or small one doesn't
@@ -230,6 +240,7 @@ assert scorer.judge_summary("vid1", floor, 6) == ("[JUDGE] Rejected all 2 candid
 assert scorer.judge_summary("vid2", [mk(6, 6, 6, 0.58, "")], 6) == "[JUDGE] Rejected all 1 candidate(s) for vid2 (best: score 5.8/10 < Min Comedy Score 6)"
 assert scorer.judge_summary("vid3", [mk(6, 6, 6, 0.58, ""), mk(7, 8, 7, 0.75, "")], 6) is None  # one passed
 assert scorer.judge_summary("vid4", [dict(cue=0, signal=0.5, visual=0)], 6) is None  # Ollama off: nothing judged
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = scorer.DEFAULTS["MIN_PAYOFF"], scorer.DEFAULTS["MIN_HOOK"]
 urllib.request.urlopen = lambda req, timeout=None: FakeResponse(b'{"response": "not json"}')
 assert scorer.ollama_judge(judge_in, "m") is None
 def offline(req, timeout=None): raise OSError("connection refused")
@@ -319,7 +330,7 @@ assert set(used) == {"MIN_PAYOFF", "VIRAL_BOOST", "PILLARS"} and scorer.MIN_PAYO
 assert scorer._verdict({"self_contained": 10, "comedy_payoff": 0, "hook_strength": 0, "quotability": 0})["llm"] == 0.25
 (wdir / "w.json").write_text(json.dumps({"PILLARS": {"comedy_payoff": 1.0}}))  # missing pillars: ignored
 assert scorer.load_weights(wdir / "w.json") == {} and scorer.PILLARS == scorer.DEFAULTS["PILLARS"]
-assert scorer.load_weights(wdir / "missing.json") == {} and scorer.MIN_PAYOFF == 5 and scorer.VIRAL_BOOST == 0.05
+assert scorer.load_weights(wdir / "missing.json") == {} and scorer.MIN_PAYOFF == 0 and scorer.VIRAL_BOOST == 0.05
 scorer.load_weights()  # back to the repo's file
 
 # hardware profile + model fallback (the Linux mini PC): this Windows box is not a mini PC

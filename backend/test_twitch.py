@@ -314,8 +314,10 @@ assert json.loads((job / "clips_manifest.json").read_text())["clips"] == [] and 
 assert events[-1] == {"event": "done", "manifest": str(job / "clips_manifest.json"), "count": 0}
 assert any("Banger gate: rated 9.5/10 < 9.9" in e.get("msg", "") for e in events), events
 
-# hard reject: dead air (no payoff AND no hook) loses even with 9000 views, a loud burst and the gate off
+# hard reject (only when the Weight Tuner sets the dead-air floor; default off): loses even with 9000 views, a loud
+# burst and the gate off
 args.min_score = 0
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5
 scorer.ollama_judge = lambda cands, model: {0: dict(VERDICT, llm=0.3, reject=True, reason="Dead air in an inventory menu.",
                                                     pillars={**VERDICT["pillars"], "comedy_payoff": 2, "hook_strength": 2})}
 with quiet() as out:
@@ -335,6 +337,7 @@ assert (job / "clip_01_twitch.mp4").exists()
 warn = [json.loads(l) for l in out.getvalue().splitlines() if '"warning"' in l]
 assert warn and warn[0]["msg"] == ("[JUDGE] Rejected all 1 candidate(s) for twitch_FunnyClip1 (best: payoff=2, hook=2: dead air "
                                    "(needs payoff >= 5 or hook >= 5)): Dead air in an inventory menu."), warn
+scorer.MIN_PAYOFF, scorer.MIN_HOOK = 0, 0
 
 # a 9/10 payoff that starts mid-conversation (self_contained 3) is NOT vetoed: it's cut and kept
 scorer.ollama_judge = lambda cands, model: {0: dict(VERDICT, llm=0.62, reason="Spoke too soon, instant karma.",

@@ -397,6 +397,23 @@ try:
 except rp.RunPodError as e:
     assert "switch it ON" in str(e)
 assert rp.ssh_cmd({"ip": "203.0.113.7", "port": 10341}, "true", tmp)[-2:] == ["root@203.0.113.7", "true"]
+# the Pod-side run line: valid shell, busy flag + a heartbeat that dies with its shell, python's exit code is the result
+job = rp.job_command(["/root/tune-o-clip/backend/clipper.py", "a b"], "/tmp/toc_run_1")
+assert job.endswith("python3 -u /root/tune-o-clip/backend/clipper.py 'a b'") and f"touch {rp.BUSY} /tmp/toc_run_1" in job
+assert "while kill -0 $$" in job and f"touch {rp.ACTIVITY}; sleep 30" in job and "</dev/null >/dev/null 2>&1 &" in job
+if shutil.which("bash"):  # the mini PC / the Pod (this Windows box has none on PATH)
+    assert subprocess.run(["bash", "-n"], input=job.encode(), capture_output=True).returncode == 0, job
+    # for real with harmless stand-ins: the heartbeat touches the activity file, then stops after the shell
+    hb = tmp / "hb"
+    hb.mkdir()
+    fake = (job.replace(". /root/toc_env.sh", "true").replace(f"cd {rp.REMOTE}", f"cd '{hb.as_posix()}'")
+            .replace(rp.BUSY, "busy").replace(rp.ACTIVITY, "act").replace("/tmp/toc_run_1", "mark").replace("sleep 30", "sleep 0.2")
+            .replace("python3 -u /root/tune-o-clip/backend/clipper.py 'a b'", "sleep 1; test -f busy && test -f act || exit 3; exit 7"))
+    assert subprocess.run(["bash", "-c", fake], capture_output=True, timeout=20).returncode == 7, "python's exit code comes back"
+    assert not (hb / "busy").exists() and (hb / "act").exists(), "the exit trap clears busy and stamps activity"
+    stamp = (hb / "act").stat().st_mtime
+    __import__("time").sleep(1.0)
+    assert (hb / "act").stat().st_mtime == stamp, "the heartbeat stopped with its shell"
 
 # --- .env key: other lines (and a Notepad BOM) survive -------------------------------------------------------------
 env = tmp / ".env"

@@ -125,10 +125,10 @@ Use an empty list when there are none.
 Clips:
 """
 PILLARS = {"self_contained": 0.35, "comedy_payoff": 0.35, "hook_strength": 0.20, "quotability": 0.10}
-# hard reject only pure dead air: no payoff AND no hook. Out-of-context clips are not vetoed (a 9/10 rage outburst is
-# viral mid-conversation; the editor's teaser/trim add context); a low self_contained just lowers the weighted score,
-# which the Min Comedy Score gate then judges.
-MIN_PAYOFF, MIN_HOOK = 5, 5
+# Optional hard reject of dead air (payoff < MIN_PAYOFF AND hook < MIN_HOOK), set in the calibration Weight Tuner.
+# OFF by default (0, 0): the Min Comedy Score setting alone decides. The 5/5 floor threw away proven gameplay clips the
+# judge scored 3/3/3/3 because nobody told a joke (twitch SmellySlipperyEggnog..., 372k views, 2026-11-15).
+MIN_PAYOFF, MIN_HOOK = 0, 0
 # Twitch clips the community already proved (views) with a big vocal reaction get a small nudge, so a 3B model's one
 # bad pillar can't throw away an obvious banger. +0.05 = half a point on the 0-10 gate.
 VIRAL_VIEWS, VIRAL_VOCAL, VIRAL_BOOST = 3000, 0.5, 0.05
