@@ -38,6 +38,7 @@ SHIFT = 8  # s: chat reacts this long after the moment
 SKIP, SKIP_MIN_DURATION = 300, 900  # skip intro / outro minutes on streams longer than 15 min
 GAP = 90  # s between picked moments
 BEFORE, AFTER = 32, 18  # the slice around a moment: setup before, reaction after (50 s, inside 45-60)
+SLICE_TIMEOUT = 120  # s per yt-dlp -g / ffmpeg attempt; a direct seek takes ~5 s
 EMOTE_RE = re.compile(r"(?<!\w)(KEKW|KEKL|OMEGALUL|LULW?|ICANT|LMAO+|LOL+|W+|CLIP|Pog\w*|EZ|xdd)(?!\w)", re.I)
 CLIP_IT_RE = re.compile(r"\bclip (it|that|this)\b", re.I)
 VOD_RE = re.compile(r"twitch\.tv/videos/(\d+)")
@@ -150,6 +151,53 @@ def slice_of(t, duration):
     return s, min(duration, s + BEFORE + AFTER)
 
 
+def stream_urls(url, run):
+    """Direct media URL(s), resolved once per video: [muxed] for a Twitch VOD (its HLS playlist), [video, audio] for
+    YouTube (separate DASH streams). Every slice then seeks straight into them with ffmpeg."""
+    fmt = "best[height<=1080]/best" if VOD_RE.search(url) else clipper.VIDEO_FORMAT + "/best[height<=1080]/best"
+    r = run(clipper.YTDLP + ["-g", "-f", fmt, url], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=SLICE_TIMEOUT)
+    urls = [u for u in (r.stdout or "").splitlines() if u.startswith("http")]
+    if r.returncode or not urls:
+        raise RuntimeError(f"yt-dlp couldn't resolve the stream URL: {last_line(r.stderr) or f'exit {r.returncode}'}")
+    return urls[:2]
+
+
+def last_line(text):
+    """The last real message in ffmpeg / yt-dlp stderr (skips -stats progress lines)."""
+    lines = [x.strip() for x in re.split(r"[\r\n]+", text or "") if x.strip() and not x.lstrip().startswith(("frame=", "size="))]
+    return lines[-1] if lines else ""
+
+
+def slice_cmd(urls, s, e, out, encode=False):
+    """ffmpeg input seek (-ss before -i): on HLS it jumps to the segment holding `s` instead of reading from 0 s."""
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "warning", "-stats"]
+    for u in urls:
+        cmd += ["-ss", f"{s:.0f}", "-i", u]
+    if len(urls) > 1:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    codec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac"] if encode else ["-c", "copy"]
+    return cmd + ["-t", f"{e - s:.0f}", *codec, str(out)]
+
+
+def download_slice(urls, s, e, out, run):
+    """Stream copy, then a re-encode if the copy fails; each attempt is killed after SLICE_TIMEOUT s.
+    -> None when `out` holds the slice, else why it failed."""
+    why = ""
+    for encode in (False, True):
+        try:  # stderr captured: the panel reads its stderr pipe only at exit, so -stats spam could fill it and block
+            r = run(slice_cmd(urls, s, e, out, encode), capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=SLICE_TIMEOUT)
+            if r.returncode == 0 and out.is_file() and out.stat().st_size > 0:
+                return None
+            why = last_line(r.stderr) or f"ffmpeg exit {r.returncode}"
+        except subprocess.TimeoutExpired:
+            out.unlink(missing_ok=True)
+            return f"ffmpeg timed out after {SLICE_TIMEOUT} s"  # a network stall: re-encoding the same stream won't help
+        out.unlink(missing_ok=True)
+    return why
+
+
 def link_at(url, start):
     t = int(start)
     if "twitch.tv" in url:
@@ -203,13 +251,17 @@ def main(argv=None, run=subprocess.run, opener=urllib.request.urlopen, sleep=tim
         emit("warning", msg=f"No spikes found in the {source}")
         return 0
     streamer = info.get("uploader") or info.get("channel") or info.get("uploader_id")
+    emit("stage", stage="download", msg="Resolving the stream URL")
+    urls = stream_urls(url, run)  # once for all slices
     for i, t in enumerate(moments, 1):
         s, e = slice_of(t, duration)
         name = f"{info['id']}_{int(s)}s"
         out = job / f"{name}.mp4"
         emit("stage", stage="download", msg=f"Downloading moment {i}/{len(moments)}: {scorer.clock(s)}-{scorer.clock(e)} only")
-        run(clipper.YTDLP + ["-f", clipper.VIDEO_FORMAT + "/b[height<=1080]/b", "--download-sections", f"*{s:.0f}-{e:.0f}",
-                             "--merge-output-format", "mp4", "-o", str(out), url], check=True)
+        why = download_slice(urls, s, e, out, run)
+        if why:
+            emit("warning", msg=f"[SLICE] Moment {i} ({scorer.clock(s)}) didn't download, skipped: {why}")
+            continue
         meta = {"clip_id": name, "title": info.get("title"), "broadcaster_name": streamer, "creator_name": None,
                 "view_count": info.get("view_count"), "url": link_at(url, s), "duration": round(e - s, 2),
                 "spike": round(float(curve[t]), 2), "spike_source": source}

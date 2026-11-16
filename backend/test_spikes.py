@@ -57,16 +57,35 @@ job.mkdir()
 sc.clipper.fetch_metadata = lambda url, ws: ({"id": "v123", "title": "big stream", "duration": DUR, "uploader": "CaseOh_",
                                               "webpage_url": "https://www.twitch.tv/videos/123"}, job)
 calls = []
-fake_run = lambda cmd, check=True: calls.append(cmd)
+
+
+class Done:  # subprocess.CompletedProcess stand-in
+    def __init__(self, stdout=""):
+        self.returncode, self.stdout, self.stderr = 0, stdout, ""
+
+
+def fake_run(cmd, **kw):
+    calls.append(cmd)
+    if "-g" in cmd:  # yt-dlp -g: Twitch = one muxed HLS URL, YouTube = video + audio
+        return Done("https://h/v.m3u8\n" if "twitch" in cmd[-1] else "https://h/video\nhttps://h/audio\n")
+    if cmd[0] == "ffmpeg":
+        Path(cmd[-1]).write_bytes(b"slice")
+    return Done()
+
+
+def seek(cmd):
+    """-> (start, length) of an ffmpeg slice command"""
+    return float(cmd[cmd.index("-ss") + 1]), float(cmd[cmd.index("-t") + 1])
+
+
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     assert sc.main(["https://www.twitch.tv/videos/123", "--chat", str(chat_file), "--clips", "2", "--auto-edit"], run=fake_run) == 0
-downloads = [c for c in calls if "--download-sections" in c]
+downloads = [c for c in calls if c[0] == "ffmpeg"]
 runs = [c for c in calls if any(str(x).endswith("clipper.py") for x in c)]
-assert len(downloads) == 2 and len(runs) == 2, calls
-sec = downloads[0][downloads[0].index("--download-sections") + 1]
-a, b = (float(x) for x in sec.lstrip("*").split("-"))
-assert 45 <= b - a <= 60 and sec.startswith("*"), sec
+assert len(downloads) == 2 and len(runs) == 2 and sum("-g" in c for c in calls) == 1, calls
+a, n = seek(downloads[0])
+assert 45 <= n <= 60 and downloads[0].index("-ss") < downloads[0].index("-i"), downloads[0]
 meta = json.loads(runs[0][runs[0].index("--twitch-meta") + 1])
 assert meta["broadcaster_name"] == "CaseOh_" and meta["clip_id"].startswith("v123_") and "?t=" in meta["url"], meta
 assert runs[0][-1] == "--auto-edit", "clipper options pass through"
@@ -85,8 +104,9 @@ sc.clipper.fetch_metadata = lambda url, ws: ({"id": "yt1", "title": "vid", "dura
                                               "webpage_url": "https://www.youtube.com/watch?v=yt1", "heatmap": heat}, job)
 with contextlib.redirect_stdout(io.StringIO()) as yt_out:
     assert sc.main(["https://www.youtube.com/watch?v=yt1", "--clips", "1"], run=fake_run) == 0
-sec = next(c for c in calls if "--download-sections" in c)
-a, b = (float(x) for x in sec[sec.index("--download-sections") + 1].lstrip("*").split("-"))
-assert a < 1815 < b, (a, b)  # the 1800-1830 s heatmap segment
+ff = next(c for c in calls if c[0] == "ffmpeg")
+a, n = seek(ff)
+assert a < 1815 < a + n, (a, n)  # the 1800-1830 s heatmap segment
+assert ff.count("-ss") == 2 and ["-map", "0:v:0", "-map", "1:a:0"] == ff[ff.index("-map"):ff.index("-map") + 4], ff
 assert "Most Replayed heatmap" in yt_out.getvalue()
 print("spikes ok")
