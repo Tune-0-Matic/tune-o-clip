@@ -1,7 +1,8 @@
 """Deterministic FFmpeg short-form factory: edl.json + clip + word timings -> 1080x1920 H.264/AAC short.
 
 One ffmpeg pass: frame-accurate trims (+ speed ramps) + concat -> 9:16 framing (split_stack facecam over gameplay
-with full-screen facecam takeovers, or blur_fill) with zooms/trauma shake per panel -> deep fry / RGB split /
+with full-screen facecam takeovers, face_crop = a 9:16 column following the faces, or blur_fill; see framing.py)
+with zooms/trauma shake per panel -> deep fry / RGB split /
 grayscale / flash / vignette -> kinetic .ass captions -> audio: original (+ mutes) + SFX + ducked music ->
 loudnorm -14 LUFS. Never AV1: NVENC / VAAPI / libx264 H.264.
 """
@@ -18,13 +19,13 @@ SFX_DIR, MUSIC_DIR, FONTS_DIR = ROOT / "assets" / "sfx", ROOT / "assets" / "musi
 W, H = 1080, 1920
 CAM_H, BORDER = 690, 4  # split_stack: facecam top 36%, 4 px seam, gameplay below
 GAME_H = H - CAM_H - BORDER
-SFX_NAMES = ("vine_boom", "metal_pipe", "bass_boost", "record_scratch", "sad_violin", "whoosh", "pop")
+SFX_NAMES = ("vine_boom", "metal_pipe", "bass_boost", "record_scratch", "sad_violin", "whoosh", "pop", "thud")
 # ASS colours are &HBBGGRR&
-TONE_COLORS = {"punch": "&H0000E6FF&",  # #FFE600 bright yellow: setups / punchlines
+TONE_COLORS = {"punch": "&H0000FFFF&",  # #FFFF00 yellow: the active word
                "hype": "&H0044FF00&",   # #00FF44 neon green: wins, "let's go"
                "rage": "&H002A2AFF&",   # #FF2A2A bright red: screams, rage, scares
-               "roast": "&H00FFE500&"}  # #00E5FF electric cyan: deadpan / chat roasts
-BOUNCE = r"{\fscx80\fscy80\t(0,60,\fscx115\fscy115)\t(60,130,\fscx100\fscy100)}"
+               "roast": "&H00FFFF00&"}  # #00FFFF cyan: the active word when it is hype / loud
+POP = r"\fscx118\fscy118\t(0,70,\fscx100\fscy100)"  # every active word pops 118% -> 100% in 70 ms
 
 
 # --- timeline -----------------------------------------------------------------------------------------------------
@@ -90,8 +91,8 @@ def clean(word):
     return "".join(ch for ch in str(word).strip().upper() if ch not in "{}\\")
 
 
-def chunk(words, size=3, span=0.9, gap=0.35):
-    """1-3 word bursts, each <= `span` s long, broken early at pauses and sentence ends."""
+def chunk(words, size=3, span=1.3, gap=0.35):
+    """1-3 word lines, each <= `span` s long, broken early at pauses and sentence ends."""
     groups, cur = [], []
     for w in words:
         if cur and (len(cur) == size or w["oend"] - cur[0]["ostart"] > span or w["ostart"] - cur[-1]["oend"] > gap
@@ -105,7 +106,7 @@ def chunk(words, size=3, span=0.9, gap=0.35):
 
 
 def write_ass(edl, words, path):
-    """Kinetic captions: 1-3 word bursts that pop in with a scale bounce, uppercase heavy font (per scenario;
+    """The ONE caption track (none when the source has its own burned in: edl["source_captions"]). Kinetic captions: 1-3 word lines that pop in with a scale bounce, uppercase heavy font (per scenario;
     Impact on screams), 8 px outline + 4 px shadow, centre-lower at MarginV 660 (clear of the split-stack seam and
     the platform's title / subscribe UI: raised from 540 after batch 1). No teaser banner: the yellow bar on top was
     disliked twice in batch 1. Neutral words white; the active word coloured by its tone (yellow / green / red / cyan)."""
@@ -117,7 +118,7 @@ def write_ass(edl, words, path):
              "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, "
              "Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
              "MarginL, MarginR, MarginV, Encoding",
-             f"Style: Pop,{font},100,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,1,0,1,8,4,2,50,50,660,1",
+             f"Style: Pop,{font},100,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,-1,0,0,0,100,100,1,0,1,4,3,2,140,140,660,1",
              "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
     events = []  # (start, end, text) for the caption track
     for s, e, o, _, sp in segs:
@@ -132,14 +133,14 @@ def write_ass(edl, words, path):
                 parts = []
                 for x in group:
                     if x is w:
-                        # colour back to white + the style font explicitly: a {\r} reset would also drop the burst's
-                        # bounce scale, so the words after the highlight would render at a different size
+                        # the active word pops and takes the colour; the words after it go back to white at 100%
+                        # explicitly (a {\r} reset would also drop the style font for a swapped Impact word)
                         swap = r"\fnImpact" if x["tone"] == "rage" else ""
-                        back = rf"{{\c&H00FFFFFF&\fn{font}}}" if swap else r"{\c&H00FFFFFF&}"
-                        parts.append(f"{{\\c{TONE_COLORS.get(x['tone'], TONE_COLORS['punch'])}{swap}}}{clean(x['word'])}{back}")
+                        back = rf"{{\c&H00FFFFFF&\fscx100\fscy100\fn{font}}}" if swap else r"{\c&H00FFFFFF&\fscx100\fscy100}"
+                        parts.append(f"{{\\c{TONE_COLORS.get(x['tone'], TONE_COLORS['punch'])}{swap}{POP}}}{clean(x['word'])}{back}")
                     else:
                         parts.append(clean(x["word"]))
-                text = (BOUNCE if i == 0 else "") + " ".join(parts)  # the bounce plays once per burst
+                text = " ".join(parts)
                 events.append((w["ostart"], max(end, w["ostart"] + 0.05), text))
     # strictly one caption on screen at a time (teaser + main cuts share this one track): each event ends 20 ms
     # before the next starts, keeping starts on the spoken word; slivers under 60 ms (1-2 frames) are dropped
@@ -201,6 +202,10 @@ def ensure_sfx(folder=SFX_DIR, sr=48000):
             ph = np.cumsum(f) / sr
             x = sum(np.sin(2 * np.pi * k * ph) / k for k in range(1, 7))
             return x * np.minimum(1, t / 0.25) * np.minimum(1, (t[-1] - t) / 0.6)
+        if name == "thud":  # clean low-end boom: 110 -> 45 Hz sine drop, soft click, no distortion (sits under a voice)
+            t = tt(0.7)
+            x = osc(45 + 65 * np.exp(-t * 14)) + 0.15 * rng.standard_normal(len(t)) * np.exp(-t * 300)
+            return x * env(t, 0.002, 0.18)
         if name == "whoosh":  # noise swept through a resonant band
             t = tt(0.7)
             noise = rng.standard_normal(len(t))
@@ -232,7 +237,9 @@ def detect_encoder(force=None):
     -> (name, global args, extra video filter, codec args). Probed once with a tiny real encode."""
     global _ENCODER
     choices = {
-        "h264_nvenc": ([], "", ["-c:v", "h264_nvenc", "-preset", "p3", "-rc", "vbr", "-cq", "22", "-b:v", "0", "-profile:v", "high"]),
+        # cq 19 on the RunPod Pod (TOC_CLOUD): it has the GPU time to spare; 22 on the GTX 1050 Ti
+        "h264_nvenc": ([], "", ["-c:v", "h264_nvenc", "-preset", "p3", "-rc", "vbr", "-cq",
+                                "19" if os.environ.get("TOC_CLOUD") == "1" else "22", "-b:v", "0", "-profile:v", "high"]),
         "h264_vaapi": (["-vaapi_device", "/dev/dri/renderD128"], ",format=nv12,hwupload", ["-c:v", "h264_vaapi", "-qp", "21"]),
         "libx264": ([], "", ["-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-profile:v", "high"]),
     }
@@ -259,106 +266,29 @@ def probe(path):
             "has_audio": any(s["codec_type"] == "audio" for s in d["streams"])}
 
 
-# --- facecam detection --------------------------------------------------------------------------------------------
-
-def face_to_cam_box(fx, fy, fw, fh, aspect=16 / 9):
-    """Normalized face rect -> normalized 4:3 webcam box around it, snapped to the frame edges it is near."""
-    cw = min(0.42, fw * 3.2)
-    ch = min(0.6, cw * aspect / (4 / 3))
-    cx, cy = fx + fw / 2, fy + fh / 2 + fh * 0.35  # a webcam frames the face a little above centre
-    x, y = min(max(0.0, cx - cw / 2), 1 - cw), min(max(0.0, cy - ch / 2), 1 - ch)
-    x = 0.0 if x < 0.04 else (1 - cw if x + cw > 0.96 else x)  # overlays hug the edges
-    y = 0.0 if y < 0.04 else (1 - ch if y + ch > 0.96 else y)
-    return tuple(round(float(v), 3) for v in (x, y, cw, ch))  # plain floats: the box goes into post.json
-
-
-def refine_cam_box(grays, face, min_ratio=2.5):
-    """Snap a webcam box to the overlay's own border: averaged over the sampled frames, gameplay edges blur out
-    while the overlay rectangle's edges stay put. Searches outward from the face (px rect) for the strongest
-    consistent edge on each side; a side with no clear edge goes to the frame border. -> px (x0, y0, x1, y1) or None."""
-    g = np.stack([x.astype(np.float32) for x in grays])
-    h, w = g.shape[1:]
-    fx, fy, fw, fh = face
-    dx = np.abs(np.diff(g, axis=2)).mean(axis=0)  # vertical edges, (h, w-1)
-    dy = np.abs(np.diff(g, axis=1)).mean(axis=0)  # horizontal edges, (h-1, w)
-    r0, r1 = max(0, int(fy - fh)), min(h, int(fy + 2 * fh))
-    c0, c1 = max(0, int(fx - fw)), min(w, int(fx + 2 * fw))
-
-    def edge(profile, lo, hi, toward_frame):
-        lo, hi = max(0, int(lo)), min(len(profile), int(hi))
-        if hi - lo < 3:
-            return toward_frame
-        seg = profile[lo:hi]
-        i = int(np.argmax(seg))
-        return lo + i + 1 if seg[i] > min_ratio * (np.median(profile) + 1e-3) else toward_frame
-
-    col = dx[r0:r1].mean(axis=0)
-    row = dy[:, c0:c1].mean(axis=1)
-    x0 = edge(col, fx - 4 * fw, fx - 0.3 * fw, 0)
-    x1 = edge(col, fx + fw * 1.3, fx + 5 * fw, w)
-    y0 = edge(row, fy - 4 * fh, fy - 0.3 * fh, 0)
-    y1 = edge(row, fy + fh * 1.3, fy + 5 * fh, h)
-    bw, bh = x1 - x0, y1 - y0
-    if bw < 1.5 * fw or bh < 1.5 * fh or bw > 0.5 * w or bh > 0.6 * h:
-        return None  # implausible: fall back to the face-scaled box
-    return x0, y0, x1, y1
-
-
-def detect_facecam_box(src, samples=5, detect=None):
-    """Webcam overlay box (x, y, w, h normalized) or None. A face must appear near a frame edge (not the middle
-    of the gameplay) at about the same spot in >= 3 of the sampled frames: webcam overlays don't move, game faces do.
-    detect: optional fn(gray image) -> [(x, y, w, h) px] (tests); default OpenCV's frontal-face Haar cascade."""
-    info = probe(src)
-    if detect is None:
-        import cv2
-        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        detect = lambda g: cascade.detectMultiScale(g, scaleFactor=1.1, minNeighbors=5, minSize=(18, 18))
-    w = 640
-    h = int(round(w * info["height"] / info["width"] / 2) * 2)
-    hits, grays = [], []
-    for i in range(samples):
-        t = info["duration"] * (i + 0.5) / samples
-        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
-                              "-vf", f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
-        if len(raw) < w * h:
-            continue
-        gray = np.frombuffer(raw[:w * h], dtype=np.uint8).reshape(h, w)
-        grays.append(gray)
-        for x, y, fw, fh in detect(gray):
-            nx, ny, nw, nh = x / w, y / h, fw / w, fh / h
-            cx, cy = nx + nw / 2, ny + nh / 2
-            near_edge = cx < 0.33 or cx > 0.67 or cy < 0.3 or cy > 0.7
-            if near_edge and nw < 0.25:
-                hits.append((i, nx, ny, nw, nh))
-    if not hits:
-        return None
-    best = None
-    for _, nx, ny, nw, nh in hits:  # largest group of hits at ~the same place, counted once per frame
-        group = [h_ for h_ in hits if abs(h_[1] - nx) < 0.05 and abs(h_[2] - ny) < 0.05]
-        frames = {h_[0] for h_ in group}
-        if best is None or len(frames) > best[0]:
-            best = (len(frames), group)
-    if best[0] < 3:
-        return None
-    med = np.median(np.array([g[1:] for g in best[1]]), axis=0)
-    box = refine_cam_box(grays, (med[0] * w, med[1] * h, med[2] * w, med[3] * h))
-    if box:
-        x0, y0, x1, y1 = box
-        return tuple(round(float(v), 3) for v in (x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h))
-    return face_to_cam_box(*med, aspect=info["width"] / info["height"])
-
-
 # --- filter graph ------------------------------------------------------------------------------------------------
 
 def _sum(terms):
     return "+".join(terms) if terms else "0"
 
 
+def teaser_on(segs):
+    return bool(segs) and segs[0][3]
+
+
+def out_time(item, key, segs):
+    """Output time of an EDL entry. "out": True entries are already output seconds and belong to the hook teaser:
+    gone with it (a QC repair can drop the teaser)."""
+    if item.get("out"):
+        return item[key] if teaser_on(segs) else None
+    return to_out(item[key], segs)
+
+
 def zoom_expr(zooms, segs, var="it"):
     """1 + sum of zoom terms: snap/punch = instant step, ramp = exponential ease-in, creep/drift = linear."""
     terms = []
     for z in zooms:
-        a = to_out(z["at"], segs)
+        a = out_time(z, "at", segs)
         if a is None:
             continue
         d, s = max(0.1, z["duration"]), z["scale"] - 1
@@ -373,11 +303,24 @@ def zoom_expr(zooms, segs, var="it"):
     return terms
 
 
+def track_expr(track, segs, var="t"):
+    """Piecewise-linear crop centre (0..1 of the source width) over OUTPUT time from [(source s, x)] keyframes."""
+    keys = sorted((o, x) for o, x in ((to_out(s, segs), x) for s, x in track) if o is not None)
+    if not keys:
+        return "0.5"
+    terms = [f"lt({var},{keys[0][0]:.3f})*{keys[0][1]:.4f}", f"gte({var},{keys[-1][0]:.3f})*{keys[-1][1]:.4f}"]
+    for (a, xa), (b, xb) in zip(keys, keys[1:]):
+        if b > a:  # gte/lt, not between(): a shared endpoint must not count twice
+            terms.append(f"gte({var},{a:.3f})*lt({var},{b:.3f})*({xa:.4f}+{xb - xa:.4f}*({var}-{a:.3f})/{b - a:.3f})")
+    return _sum(terms)
+
+
 def spans(filters, kind, segs):
     out = []
     for f in filters:
         if f["type"] == kind:
-            a, b = to_out(f["start"], segs), to_out(min(f["end"], f["start"] + 60), segs)
+            a = out_time(f, "start", segs)
+            b = a + f["end"] - f["start"] if f.get("out") and a is not None else to_out(min(f["end"], f["start"] + 60), segs)
             if a is not None:
                 out.append((a, b if b is not None and b > a else a + 0.3))
     return out
@@ -388,15 +331,19 @@ def _on(sp):
 
 
 def panel_fx(edl, segs, w, h, fps, zoom=True):
-    """Zoom (zoompan, centred) + trauma shake (+-20 px damped jitter via a fixed-size crop) on one panel."""
+    """Zoom (zoompan about edl["zoom_anchor"] = [ax, ay, max zoom] from framing.zoom_room: the anchor point stays
+    put, so a punch-in grows down from the heads' top, and the cap keeps every head in the panel) + trauma shake
+    (+-8 px damped micro jitter via a fixed-size crop) on one panel."""
     chain = []
     zt = zoom_expr(edl.get("zooms", []), segs) if zoom else []
     if zt:
-        chain.append(f"zoompan=z='1+{_sum(zt)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps={fps}")
+        ax, ay, top = edl.get("zoom_anchor") or (0.5, 0.5, 1.35)
+        chain.append(f"zoompan=z='min({top:.3f},1+{_sum(zt)})':x='(iw-iw/zoom)*{ax:.3f}':y='(ih-ih/zoom)*{ay:.3f}'"
+                     f":d=1:s={w}x{h}:fps={fps}")
     shakes = spans(edl.get("filters", []), "trauma_shake", segs)
     if shakes:
-        amp = _sum([f"between(t,{a:.3f},{b:.3f})*20*exp(-9*(t-{a:.3f}))" for a, b in shakes])
-        chain.append(f"crop=w=iw-44:h=ih-44:x='22+({amp})*sin(113*t)':y='22+({amp})*cos(97*t)',scale={w}:{h}")
+        amp = _sum([f"between(t,{a:.3f},{b:.3f})*8*exp(-12*(t-{a:.3f}))" for a, b in shakes])
+        chain.append(f"crop=w=iw-20:h=ih-20:x='10+({amp})*sin(113*t)':y='10+({amp})*cos(97*t)',scale={w}:{h}")
     return ("," + ",".join(chain)) if chain else ""
 
 
@@ -434,6 +381,9 @@ def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=Non
             fc.append(f"[fs]{crop_cam},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}"
                       f"{panel_fx(edl, segs, W, H, fps, zoom=False)}[full]")
             fc.append(f"[stack][full]overlay=0:0:enable='{_on(takes)}'[lay]")
+    elif edl.get("layout") == "face_crop" and edl.get("crop_track"):  # full-height 9:16 column following the faces
+        fc.append(f"[vb]crop=w=trunc(ih*9/32)*2:h=ih:x='clip(({track_expr(edl['crop_track'], segs)})*iw-ow/2,0,iw-ow)':y=0,"
+                  f"scale={W}:{H}{panel_fx(edl, segs, W, H, fps)}[lay]")
     else:
         fh = int(round(W * info["height"] / info["width"] / 2) * 2)  # 16:9 -> 1080x608
         fc.append("[vb]split[bgs][fgs]")
@@ -464,7 +414,7 @@ def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=Non
     # relative to the work dir (ffmpeg's cwd): an absolute Windows path's "C:" would need double filtergraph escaping
     has_fonts = FONTS_DIR.exists() and any(p.suffix.lower() in (".ttf", ".otf") for p in FONTS_DIR.iterdir())
     fonts = f":fontsdir={Path(os.path.relpath(FONTS_DIR, workdir)).as_posix()}" if has_fonts else ""
-    post += [f"subtitles=subs.ass{fonts}", "format=yuv420p"]
+    post += ([] if edl.get("source_captions") else [f"subtitles=subs.ass{fonts}"]) + ["format=yuv420p"]
     fc.append("[lay]" + ",".join(post) + vf_tail + "[vout]")
 
     # audio: original (with mutes) + SFX + ducked music -> loudnorm
@@ -476,7 +426,7 @@ def build_command(src, edl, words, out, workdir, info, encoder=None, facecam=Non
     fc.append(main + (",asplit=2[main][side]" if use_music else "[main]"))
     mix, k = ["[main]"], 1
     for fx in edl.get("sfx", []):
-        f, at = sfx_file(fx["name"], sfx_dir), to_out(fx["at"], segs)
+        f, at = sfx_file(fx["name"], sfx_dir), out_time(fx, "at", segs)
         if f is None or at is None:
             continue  # missing asset or the moment was cut: skip quietly
         inputs += ["-i", str(f)]

@@ -170,12 +170,7 @@ def load_weights(path=None):
 load_weights()
 
 
-def jaccard(a, b, min_words=5):
-    """Share of distinct words two transcripts have in common (0..1); 0 when either is too short to tell."""
-    ta, tb = (set(re.findall(r"[a-z0-9']+", t.lower())) for t in (a, b))
-    if len(ta) < min_words or len(tb) < min_words:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
+from history import jaccard  # noqa: E402,F401  (one copy, stdlib-only for the publisher; clipper uses scorer.jaccard)
 
 
 def clock(sec):
@@ -486,14 +481,20 @@ def total_ram_gib():
 # A Linux box with <= 8 GB RAM (the Scala mini PC: Ryzen V120B 2C/4T, 6 GB, Vega 3, no NVIDIA) is low-spec without any
 # env var: CPU Whisper, Ollama kept warm, 4 ffmpeg threads, a longer Ollama timeout (CPU inference). TOC_LOW_SPEC=0/1
 # overrides either way. The flag is exported so the clipper / editor child processes see the same profile.
-MINI_PC = sys.platform.startswith("linux") and (total_ram_gib() or 99) <= 8.5
+# TOC_CLOUD=1 is set on the RunPod Pod (backend/runpod_manager.py): 20 GB VRAM, so the big models and no low-spec rules.
+CLOUD = os.environ.get("TOC_CLOUD") == "1"
+MINI_PC = not CLOUD and sys.platform.startswith("linux") and (total_ram_gib() or 99) <= 8.5
 LOW_SPEC = os.environ.get("TOC_LOW_SPEC", "1" if MINI_PC else "0") == "1"
 if LOW_SPEC:
     os.environ["TOC_LOW_SPEC"] = "1"
-KEEP_WARM = "5m"
+KEEP_WARM = "10m" if CLOUD else "5m"
 # the judge / director model: the 3B the taste profile was calibrated with; setup_linux.sh sets TOC_OLLAMA_MODEL=
 # qwen2.5:1.5b in the mini PC's .env (2x faster on its CPU)
-DEFAULT_MODEL = os.environ.get("TOC_OLLAMA_MODEL") or "richardyoung/qwen2.5-3b-instruct-abliterated"
+DEFAULT_MODEL = os.environ.get("TOC_OLLAMA_MODEL") or (
+    "qwen2.5:14b-instruct" if CLOUD else "richardyoung/qwen2.5-3b-instruct-abliterated")
+# Whisper: large-v3-turbo in float16 on the Pod; small.en here (the GTX 1050 Ti can't do float16)
+DEFAULT_WHISPER = "large-v3-turbo" if CLOUD else "small.en"
+WHISPER_GPU_COMPUTE = "float16" if CLOUD else "auto"
 # s of wall clock per call, then one retry, then the caller's fallback; 60 s on the mini PC's CPU-only inference
 OLLAMA_TIMEOUT = float(os.environ.get("TOC_OLLAMA_TIMEOUT") or (60 if MINI_PC else 45))
 FALLBACK_MODELS = ("qwen2.5:1.5b",)  # setup_linux.sh pulls it next to the 3B the calibration was done with
@@ -522,7 +523,7 @@ def ollama_generate(prompt, model, url="http://localhost:11434", timeout=OLLAMA_
     freeze a batch. A timeout is logged and retried `retries` times, then raises TimeoutError (an OSError, so every
     caller's existing offline fallback applies). Any other error (offline, bad JSON) raises at once."""
     body = json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json",
-                       "options": {"temperature": temperature}, **({"keep_alive": KEEP_WARM} if LOW_SPEC else {})}).encode()
+                       "options": {"temperature": temperature}, **({"keep_alive": KEEP_WARM} if LOW_SPEC or CLOUD else {})}).encode()
     for attempt in range(retries + 1):
         box = {}
 
@@ -614,11 +615,40 @@ def ollama_callbacks(cands, model, url="http://localhost:11434", timeout=OLLAMA_
     return out
 
 
+METADATA_PROMPT = """You write the post for an approved viral Short of a streamer clip. From the transcript and the
+judge's note, reply with JSON only, keys:
+- "title_angles": 4 different punchy titles, EACH 42 to 52 characters long, each a different angle (the reaction,
+  the absurd line, the situation, a question). No hashtags or emojis in titles. Never invent events.
+- "hashtags": exactly 5 hashtags (the streamer, the game or topic, the joke, #shorts, one broad one like #funny).
+- "pinned_comment": one short line (under 100 characters) to pin under the video that makes people reply.
+"""
+TITLE_LEN = (38, 56)  # the prompt asks 42-52; a title a few characters off still reads fine, far off does not
+
+
+def ollama_metadata(c, model, streamer=None, url="http://localhost:11434", timeout=OLLAMA_TIMEOUT):
+    """-> {"title_angles": 1-4 titles, "hashtags": 5 or fewer, "pinned_comment"} for an approved clip, or {} (offline,
+    junk). Only what passes validation is kept: nothing is made up to fill the gaps."""
+    ctx = {"streamer": streamer, "transcript": str(c.get("transcript") or "")[:1200], "judge": c.get("judge_reason")}
+    try:
+        d = _ask_json(METADATA_PROMPT + json.dumps(ctx, ensure_ascii=False), model, url, timeout)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    titles = [re.sub(r"\s+", " ", t).strip().strip('"') for t in d.get("title_angles") or [] if isinstance(t, str)]
+    titles = list(dict.fromkeys(t for t in titles if TITLE_LEN[0] <= len(t) <= TITLE_LEN[1] and "#" not in t))[:4]
+    tags = ["#" + re.sub(r"[^a-z0-9_]", "", t.lower().lstrip("#")) for t in d.get("hashtags") or [] if isinstance(t, str)]
+    tags = list(dict.fromkeys(t for t in tags if len(t) > 1))[:5]
+    pin = re.sub(r"\s+", " ", str(d.get("pinned_comment") or "")).strip()[:150]
+    out = {k: v for k, v in (("title_angles", titles), ("hashtags", tags), ("pinned_comment", pin)) if v}
+    return out
+
+
 def ollama_warmup(model, url="http://localhost:11434"):
     """Load the model into memory without generating (an empty prompt), so the judge call later skips the
     ~40 s cold load. Fire-and-forget: errors just mean the judge pays the load itself. (LOW_SPEC runs Whisper on the
     CPU, so loading the model while it transcribes is safe there too.)"""
-    body = json.dumps({"model": model, "keep_alive": KEEP_WARM if LOW_SPEC else "10m"}).encode()
+    body = json.dumps({"model": model, "keep_alive": KEEP_WARM if LOW_SPEC or CLOUD else "10m"}).encode()
     try:
         req = urllib.request.Request(url + "/api/generate", body, {"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=180).close()

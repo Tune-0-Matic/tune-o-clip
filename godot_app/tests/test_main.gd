@@ -129,6 +129,11 @@ func _initialize() -> void:
 	FileAccess.open(pub_ready.get_base_dir().path_join("posted/pv_1_post.json"), FileAccess.WRITE).store_string(JSON.stringify({"title": "Spoke too soon", "duration": 30.5}))
 	assert(main.short_path(posted_e) == pub_ready.get_base_dir().path_join("posted/pv_1_short.mp4"), main.short_path(posted_e))
 	assert(main._short_summary(posted_e).begins_with("POSTED: Spoke too soon  |  30.5s"), main._short_summary(posted_e))
+	assert(main._post_card(posted_e) == "", "no card: Ollama was off for that clip")
+	var card_path := pub_ready.get_base_dir().path_join("posted/pv_1_post.txt")
+	FileAccess.open(card_path, FileAccess.WRITE).store_string("TITLE ANGLES:\n  1. He spoke way too soon and chat never let it go\n\nPINNED COMMENT: Who called it?\n")
+	assert(main._post_card(posted_e).contains("He spoke way too soon") and main._post_card(posted_e).contains("PINNED COMMENT"), main._post_card(posted_e))
+	DirAccess.remove_absolute(card_path)
 	FileAccess.open(main.history_path, FileAccess.WRITE).store_string(JSON.stringify({"posts": [
 			{"short_id": "pv_1", "platform": "youtube", "posted_at": now_u, "status": "UPLOADED"},
 			{"short_id": "pv_1", "platform": "tiktok", "posted_at": now_u, "status": "FAILED"}]}))
@@ -168,6 +173,20 @@ func _initialize() -> void:
 	assert(main.url_edit.visible and not main.batch_box.visible and not main.twitch_hint.visible, "single URL by default")
 	main.set_mode(2)
 	assert(main.twitch_hint.visible and not main.url_edit.visible and not main.batch_box.visible, "Twitch mode")
+	# Twitch VOD Chat Spikes: the URL box, spike_clipper.py, clipper options + --auto-edit, a saved chat log passed along
+	main.set_mode(3)
+	assert(main.mode_opt.get_item_text(3) == "Twitch VOD Chat Spikes" and main.url_edit.visible and not main.twitch_hint.visible)
+	assert(main.url_edit.placeholder_text.contains("twitch.tv/videos/"), main.url_edit.placeholder_text)
+	var sargs: PackedStringArray = main.build_spike_args("https://www.twitch.tv/videos/987654321")
+	assert(sargs[1].ends_with("backend/spike_clipper.py") and sargs[2] == "https://www.twitch.tv/videos/987654321", str(sargs))
+	assert("--clips" in sargs and not "--chat" in sargs, "no chat log saved for this VOD: %s" % str(sargs))
+	var chat_dir: String = main._project_root().path_join("workspace/chat")
+	DirAccess.make_dir_recursive_absolute(chat_dir)
+	var chat_file := chat_dir.path_join("987654321.json")
+	FileAccess.open(chat_file, FileAccess.WRITE).store_string("[]")
+	sargs = main.build_spike_args("https://www.twitch.tv/videos/987654321?t=1h")
+	assert(sargs[sargs.find("--chat") + 1] == chat_file, "workspace/chat/<vod id>.json goes along: %s" % str(sargs))
+	DirAccess.remove_absolute(chat_file)
 	main.set_mode(1)
 	assert(main.batch_box.visible and not main.url_edit.visible, "Batch mode shows the paste box")
 	var bargs: PackedStringArray = main.build_batch_args("https://youtu.be/AAAAAAAAAAA
@@ -735,7 +754,7 @@ https://www.youtube.com/playlist?list=PL1
 	assert(hist.back() == "▶ AI Judge — 42s", str(hist))
 	assert(is_equal_approx(main.progress_bar.value, 12.5), str(main.progress_bar.value))  # video 1 of 4, half way through it
 	main.track_task({"event": "stage", "stage": "edit", "msg": "Editing short 1/2"}, tt0 + 60_000)
-	main.track_task({"event": "log", "msg": "Facecam: detected at (0.0, 0.13, 0.21, 0.28)"}, tt0 + 61_000)
+	main.track_task({"event": "log", "msg": "Framing: split_stack (webcam face at (0.05, 0.31) in 118/120 samples)"}, tt0 + 61_000)
 	assert(main.task_label.text == "Editing short 1/2 [split_stack]", main.task_label.text)
 	assert(is_equal_approx(main.progress_bar.value, 18.75), str(main.progress_bar.value))
 	main.track_task({"event": "queue", "msg": "Processing twitch_y (attempt 1)", "pending": 2}, tt0 + 80_000)
@@ -800,5 +819,116 @@ https://www.youtube.com/playlist?list=PL1
 		await create_timer(0.1).timeout
 		bwait += 0.1
 	assert(main._thread == null and not main.run_button.disabled, "free again after the busy run")
+
+	# RunPod: no state file = local; a ready Pod reroutes runs through runpod_manager.py run --; the spend meter
+	var rp_state := OS.get_user_data_dir().path_join("test_runpod_state.json")
+	main.runpod_state_path = rp_state
+	DirAccess.remove_absolute(rp_state)
+	var run_args := PackedStringArray(["-u", main._clipper_path(), "https://youtu.be/x", "--clips", "4"])
+	assert(main.cloud_args(run_args) == run_args and not main.cloud_ready(), "no Pod: runs stay local")
+	main.refresh_cloud_ui()
+	assert(main.cloud_label.text == "Local 1050 Ti" and main.cloud_button.text == "RUNPOD GPU: OFF", main.cloud_label.text)
+	var f := FileAccess.open(rp_state, FileAccess.WRITE)
+	f.store_string(JSON.stringify({"pod_id": "p1", "ready": false, "created": 1000.0, "cost_per_hr": 0.28,
+			"gpu": "NVIDIA RTX 4000 Ada Generation"}))
+	f.close()
+	assert(main.cloud_args(run_args) == run_args, "a Pod that is still starting gets no runs")
+	f = FileAccess.open(rp_state, FileAccess.WRITE)
+	f.store_string(JSON.stringify({"pod_id": "p1", "ready": true, "created": 1000.0, "cost_per_hr": 0.28,
+			"gpu": "NVIDIA RTX 4000 Ada Generation"}))
+	f.close()
+	var wrapped: PackedStringArray = main.cloud_args(run_args)
+	assert(wrapped.slice(0, 4) == PackedStringArray(["-u", main._runpod_script(), "run", "--"]) and wrapped.slice(4) == run_args.slice(1), str(wrapped))
+	assert(main.cloud_meter_text(main.load_cloud_state(), 1000.0 + 3600.0, 1.5) == "RunPod RTX 4000 Ada • $0.28/hr • $0.28 / $1.50",
+			main.cloud_meter_text(main.load_cloud_state(), 1000.0 + 3600.0, 1.5))
+	assert(main.cloud_meter_text({"pod_id": "x", "created": 0.0}, 3600.0, 1.5).contains("$0.70 / $1.50"), "no price: the $0.70/hr fallback")
+	main.refresh_cloud_ui()
+	assert(main.cloud_button.text == "RUNPOD GPU: ON" and main.cloud_button.button_pressed, main.cloud_button.text)
+	# RunPod ready: a local Ollama being off is no problem (no banner, START not blocked)
+	main.banner.visible = false
+	main.ollama_badge.text = "OLLAMA: ONLINE"
+	main.set_ollama_status(false)
+	assert(not main.banner.visible and main.ollama_badge.text == "OLLAMA: ON POD" and main._systems.ollama, main.ollama_badge.text)
+	assert(not main.missing_systems().has("Ollama"), str(main.missing_systems()))
+	main._on_cloud_line(JSON.stringify({"event": "runpod", "stage": "orphan", "msg": "WARNING: RunPod Pod Active ($0.28/hr) - Click to Terminate"}))
+	assert(main.cloud_banner.visible and main.cloud_banner.text.begins_with("WARNING: RunPod Pod Active"), main.cloud_banner.text)
+	main._on_cloud_line(JSON.stringify({"event": "runpod", "stage": "off", "msg": "terminated"}))
+	assert(not main.cloud_banner.visible, "banner gone once terminated")
+	DirAccess.remove_absolute(rp_state)
+
+	# RUNPOD drawer: catalog rows (sorted by the backend), availability per chosen cloud type, prices, balance
+	var cat := {"event": "runpod_gpus", "balance": 9.73, "selected": "NVIDIA RTX 4000 Ada Generation", "cloud_type": "ALL",
+			"max_usd": 1.5, "idle_min": 10, "gpus": [
+		{"id": "NVIDIA RTX 4000 Ada Generation", "name": "RTX 4000 Ada", "memory": 20, "price": {"SECURE": 0.28, "COMMUNITY": 0.2},
+				"avail": {"SECURE": "NONE", "COMMUNITY": "LOW"}, "vcpu": {"SECURE": null, "COMMUNITY": 6}, "ram": {"SECURE": null, "COMMUNITY": 31}},
+		{"id": "NVIDIA L4", "name": "L4", "memory": 24, "price": {"SECURE": 0.69, "COMMUNITY": null},
+				"avail": {"SECURE": "NONE", "COMMUNITY": "NONE"}, "vcpu": {}, "ram": {}},
+		{"id": "NVIDIA GeForce RTX 3070", "name": "RTX 3070", "memory": 8, "price": {"SECURE": null, "COMMUNITY": 0.13},
+				"avail": {"SECURE": "NONE", "COMMUNITY": "LOW"}, "vcpu": {}, "ram": {}}]}
+	main._on_cloud_line(JSON.stringify(cat))
+	await process_frame  # queue_free of the placeholder row
+	var gpu_list: Array = main.gpu_rows.get_children().filter(func(n: Node) -> bool: return not n.is_queued_for_deletion())
+	assert(gpu_list.size() == 3, "three catalog rows: %d" % gpu_list.size())
+	assert((gpu_list[2] as Button).text.contains("TOO SMALL (needs 16 GB VRAM)") and (gpu_list[2] as Button).disabled, (gpu_list[2] as Button).text)
+	var ada: Button = gpu_list[0]
+	assert(ada.text.contains("▶") and ada.text.contains("20 GB VRAM") and ada.text.contains("6 vCPU · 31 GB RAM")
+			and ada.text.contains("$0.20/hr community") and ada.text.contains("~$0.010 per 3-min batch") and ada.text.contains("AVAILABLE (LOW)")
+			and not ada.disabled, ada.text)
+	assert((gpu_list[1] as Button).text.contains("OUT OF CAPACITY") and not (gpu_list[1] as Button).disabled,
+			"out of capacity stays clickable (ON tries the pick first; stock flips): %s" % (gpu_list[1] as Button).text)
+	# a click anywhere on a row: each row is one full-width Button with no child controls to swallow the click
+	for r: Button in gpu_list:
+		assert(r.get_child_count() == 0 and r.mouse_filter == Control.MOUSE_FILTER_STOP and r.size_flags_horizontal == Control.SIZE_EXPAND_FILL)
+	var saved_choice: Array = []
+	var real_saver: Callable = main.save_runpod_choice
+	main.save_runpod_choice = func(gpu: String, cloud: String) -> void: saved_choice.append([gpu, cloud])
+	(gpu_list[1] as Button).pressed.emit()  # the L4 row
+	assert(main.runpod_info.text.contains("Selected: L4"), main.runpod_info.text)
+	assert((gpu_list[1] as Button).text.begins_with("▶") and not (gpu_list[0] as Button).text.begins_with("▶"),
+			"the arrow moved: %s | %s" % [(gpu_list[1] as Button).text, (gpu_list[0] as Button).text])
+	assert(main.gpu_rows.get_children() == gpu_list, "a click re-labels the rows; none are freed or rebuilt (no flicker)")
+	assert(main.on_args() == PackedStringArray(["--gpu", "NVIDIA L4", "--cloud", "ALL"]), str(main.on_args()))
+	assert(saved_choice == [["NVIDIA L4", "ALL"]], "GPU + cloud type saved together: %s" % str(saved_choice))
+	main._on_cloud_line(JSON.stringify(cat))  # a refresh that read .env before the save landed: still the old GPU
+	assert(main.on_args()[1] == "NVIDIA L4" and main.runpod_info.text.contains("Selected: L4"), "a stale refresh can't undo the click")
+	gpu_list = main.gpu_rows.get_children()
+	assert(gpu_list.size() == 3 and (gpu_list[1] as Button).text.begins_with("▶"), "rebuilt rows keep the pick")
+	(gpu_list[0] as Button).pressed.emit()  # back to the Ada for the checks below
+	main.save_runpod_choice = real_saver
+	main._gpu_picked = false
+	assert(main.runpod_info.text.contains("Balance: $9.73") and main.runpod_info.text.contains("Session cap: $1.50")
+			and main.runpod_info.text.contains("Idle auto-terminate: 10 min"), main.runpod_info.text)
+	# ON / Test Deploy carry the drawer's choice on the command line (no race with its .env write)
+	assert(main.on_args() == PackedStringArray(["--gpu", "NVIDIA RTX 4000 Ada Generation", "--cloud", "ALL"]), str(main.on_args()))
+	main._gpu_selected = "NVIDIA A40"  # what a row click sets (select_gpu also writes .env, not done in tests)
+	main._cloud_type = "SECURE"
+	assert(main.on_args() == PackedStringArray(["--gpu", "NVIDIA A40", "--cloud", "SECURE"]), str(main.on_args()))
+	main._on_cloud_line(JSON.stringify({"event": "runpod", "stage": "diag", "msg": "API key (GET /pods): OK"}))
+	assert(main.cloud_label.text != "API key (GET /pods): OK", "diagnostics go to the console, not the status label")
+	main._gpu_selected = "NVIDIA RTX 4000 Ada Generation"
+	var saved_catalog: Array = main._gpu_catalog
+	main._gpu_catalog = []
+	assert(main.on_args().is_empty(), "drawer not loaded: .env's choice applies")
+	main._gpu_catalog = saved_catalog
+	main._cloud_type = "SECURE"  # the Ada is sold out on Secure
+	assert(main.gpu_offer(cat.gpus[0])[0] < 0 and main.gpu_offer(cat.gpus[0])[1] == "NONE", str(main.gpu_offer(cat.gpus[0])))
+	main._cloud_type = "ALL"
+
+	# HARDWARE + SESSION STATS: the Pod's specs while RunPod is ready, this PC's again once OFF
+	main.apply_telemetry({"cloud": {"gpu_type": "NVIDIA RTX 4000 Ada Generation", "cost_per_hr": 0.28, "cpu": 37.5, "vcpu": 9.0,
+			"ram_used": 12.3, "ram_total": 50.0, "disk_free": 18.4,
+			"gpu": {"name": "NVIDIA RTX 4000 Ada Generation", "util": 61.0, "used": 9100.0, "total": 20475.0, "temp": 58.0}}})
+	assert((main.gauges["GPU"].label as Label).text == "RTX 4000 Ada (Cloud) 61%   58°C", (main.gauges["GPU"].label as Label).text)
+	assert((main.gauges["VRAM"].label as Label).text == "VRAM 9100 / 20475 MB" and (main.gauges["RAM"].label as Label).text == "RAM 12.3 / 50.0 GB")
+	assert((main.gauges["CPU"].label as Label).text == "CPU 37%   (9.0 vCPU)" and main.disk_label.text == "Disk free: 18.4 GB (Pod)", main.disk_label.text)
+	assert(main.stats_label.text.contains("Encoder: NVENC RTX 4000 Ada (H.264 -cq 19)")
+			and main.stats_label.text.contains("AI: Whisper large-v3-turbo + Ollama qwen2.5:14b-instruct ($0.28/hr)"), main.stats_label.text)
+	main.apply_telemetry({"cloud": {"gpu_type": "NVIDIA GeForce RTX 3090", "cost_per_hr": 0.22, "encoder": "libx264", "gpu": {}}})
+	assert(main.stats_label.text.contains("CPU libx264 on the Pod (NVENC blocked on this host)"), main.stats_label.text)  # measured live
+	main.apply_telemetry({"cloud": {}})  # SSH down: the spec fallback, never this PC's numbers
+	assert((main.gauges["GPU"].label as Label).text.contains("(Cloud)") or (main.gauges["GPU"].label as Label).text.contains("stats unavailable"))
+	main.apply_telemetry({"gpu": {"util": 10.0, "used": 1186.0, "total": 4096.0, "temp": 59.0}, "cpu": 33.0})  # OFF: local again
+	assert((main.gauges["VRAM"].label as Label).text == "VRAM 1186 / 4096 MB" and not main.disk_label.text.contains("(Pod)"), main.disk_label.text)
+	assert(main.stats_label.text.contains("($0.00)") and not main.stats_label.text.contains("qwen2.5:14b"), main.stats_label.text)
 	print("test_main ok")
 	quit(0)

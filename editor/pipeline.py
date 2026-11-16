@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,15 +23,13 @@ import clipper  # noqa: E402
 import scorer  # noqa: E402
 
 import director  # noqa: E402
+import framing  # noqa: E402
 import qc  # noqa: E402
 import renderer  # noqa: E402
 
 SR = 16000
 READY = ROOT / "ready_to_post"
 SETTINGS = ROOT / "workspace" / "settings.json"  # written by the Godot SETTINGS panel
-# per-streamer webcam boxes, learned from detections and manual overrides. Its own file: the panel rewrites
-# settings.json from memory on every change and would drop keys the editor added during a run.
-PRESETS = ROOT / "workspace" / "facecam_presets.json"
 DEFAULT_MODEL = scorer.DEFAULT_MODEL
 _WHISPER = {}
 
@@ -39,7 +38,7 @@ def emit(event, **data):
     print(json.dumps({"event": event, **data}), flush=True)
 
 
-def transcribe_words(audio, model_name="small.en", device="auto"):
+def transcribe_words(audio, model_name=scorer.DEFAULT_WHISPER, device="auto"):
     """[{word, start, end}] for the whole clip (faster-whisper word_timestamps). CUDA first, CPU int8 fallback."""
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     clipper.add_cuda_dll_dirs()
@@ -48,7 +47,7 @@ def transcribe_words(audio, model_name="small.en", device="auto"):
     def run(dev):
         key = (model_name, dev)
         if key not in _WHISPER:
-            _WHISPER[key] = WhisperModel(model_name, device=dev, compute_type="int8" if dev == "cpu" or scorer.LOW_SPEC else "auto",
+            _WHISPER[key] = WhisperModel(model_name, device=dev, compute_type="int8" if dev == "cpu" or scorer.LOW_SPEC else scorer.WHISPER_GPU_COMPUTE,
                                          cpu_threads=4 if scorer.LOW_SPEC else 0)
         segs, _ = _WHISPER[key].transcribe(audio, language="en", word_timestamps=True, beam_size=1,
                                              initial_prompt=scorer.GAMING_PROMPT, vad_filter=True,
@@ -65,25 +64,33 @@ def transcribe_words(audio, model_name="small.en", device="auto"):
     return run("cpu")
 
 
-def snap_words_to_audio(words, env, hop=director.HOP, max_shift=0.25, guard=0.06):
-    """Acoustic onset snap: Whisper tends to start a word early (in the silence before it). Move each start forward
-    to the first 50 ms frame whose loudness clears the clip's noise floor, by at most max_shift and never closer than
-    `guard` to the word's end, so a caption pops on the frame the syllable is heard. Starts only ever move later."""
+def snap_words_to_audio(words, env, hop=director.HOP, max_shift=0.25, guard=0.06, min_len=0.12):
+    """Acoustic snap. Start: Whisper tends to start a word early (in the silence before it); move it forward to the
+    first 50 ms frame whose loudness clears the clip's noise floor, by at most max_shift and never closer than `guard`
+    to the word's end, so a caption pops on the frame the syllable is heard. End: Whisper also stretches a word over
+    the silence after it (live: CaseOh's "my" 38.96-40.86 s, ~0.3 s of it audible), which kept dead air in the cut and
+    left its caption up through it; pull the end back to the last audible frame (>= min_len after the start).
+    Starts only ever move later, ends only earlier."""
     if not env.size:
         return words
     floor = float(np.percentile(env, 20))
     threshold = max(2 * floor, floor + 0.05)
+    loud = lambda t: director.env_at(env, t + 1e-6, hop) >= threshold  # +1e-6: 0.35 + 3 * 0.05 must land in frame 10
     out = []
     for w in words:
         limit = min(w["start"] + max_shift, w["end"] - guard)
         start, k = w["start"], 0
         while w["start"] + k * hop <= limit + 1e-9:
             t = w["start"] + k * hop
-            if director.env_at(env, t + 1e-6, hop) >= threshold:  # +1e-6: 0.35 + 3 * 0.05 must land in frame 10
+            if loud(t):
                 start = t
                 break
             k += 1
-        out.append(dict(w, start=round(max(w["start"], start), 3)))
+        start = max(w["start"], start)
+        end = w["end"]
+        while end - hop >= start + min_len and not loud(end - hop):
+            end -= hop
+        out.append(dict(w, start=round(start, 3), end=round(end, 3)))
     return out
 
 
@@ -91,58 +98,6 @@ def streamer_key(manifest):
     """Who made the clip: the Twitch login, else the YouTube channel handle / id, lowercased (None if unknown)."""
     name = (manifest.get("twitch") or {}).get("broadcaster_name") or manifest.get("channel")
     return str(name).strip().lstrip("@").lower() or None if name else None
-
-
-def load_presets(path=PRESETS):
-    try:
-        d = json.loads(Path(path).read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def save_preset(key, box, path=PRESETS):
-    d = load_presets(path)
-    d[key] = [round(float(v), 3) for v in box]
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(d, indent=2), encoding="utf-8")
-
-
-# IRL / call streamers: the camera layout changes from stream to stream, so a saved box crops the wrong spot.
-# Batch 1: 5 of 10 LosPollosTV shorts drew "can't see the streamer / camera cut off / no webcam"; its blur_fill
-# shorts (no box) were rated 10, 8, 8.
-DETECT_EVERY_CLIP = {"lospollostv"}
-MATCH_IOU = 0.3  # below this the box detected in this clip is somewhere else than the saved one
-
-
-def iou(a, b):
-    ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    return inter / (a[2] * a[3] + b[2] * b[3] - inter) if inter else 0.0
-
-
-def pick_facecam(manifest, explicit, src, path=PRESETS, detect=None):
-    """-> (box or None, what happened). An explicit box (--facecam-box / SETTINGS Facecam Box) wins and is saved
-    for this streamer. Otherwise every clip runs OpenCV detection: a saved preset is used while this clip's
-    detection agrees with it or finds nothing (a turned face), a detection somewhere else wins for this clip (the
-    preset stays), and a streamer's first detection is saved. DETECT_EVERY_CLIP streamers never use or save presets:
-    no webcam found -> blur_fill. A clip with no known streamer simply detects every time."""
-    key = streamer_key(manifest)
-    if explicit is not None:
-        if key:
-            save_preset(key, explicit, path)
-        return tuple(explicit), f"set by hand at {tuple(explicit)}" + (f" (saved for {key})" if key else "")
-    fresh = key in DETECT_EVERY_CLIP
-    preset = None if fresh or not key else load_presets(path).get(key)
-    box = (detect or renderer.detect_facecam_box)(src)
-    if isinstance(preset, list) and len(preset) == 4:
-        if box and iou(box, preset) < MATCH_IOU:  # batch 1: "head cut way too far", "can't see the streamer"
-            return box, f"detected at {box}: {key}'s saved box {tuple(preset)} doesn't match this clip (preset kept)"
-        return tuple(preset), f"{key}'s saved box {tuple(preset)}"
-    if box and key and not fresh:
-        save_preset(key, box, path)
-    return box, (f"detected at {box}" + (f" (saved for {key})" if key else "") if box else "none found (blur_fill)")
 
 
 def subtract(cuts, a, b, min_piece=0.3):
@@ -233,9 +188,25 @@ def make_room_for_render(free_mib=None, unload=None):
     return True
 
 
+LOUDNESS_PASSES = 2
+LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+def boost_loudness(path):
+    """One more -14 LUFS loudnorm pass on a finished short, audio only (the video is copied, so it takes seconds).
+    The render's own loudnorm can't lift a very quiet mic in one go: live 912079449_1 came from a -32.8 LUFS clip
+    with sharp peaks, the -1.5 dBTP limit stopped it at -16.5 LUFS / -20.3 dB mean (QC floor -20). One pass more:
+    -15.1 LUFS / -18.8 dB, peaks still -1.3 dB."""
+    path = Path(path)
+    tmp = path.with_name(path.stem + ".loud" + path.suffix)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(path), "-map", "0", "-c:v", "copy", "-af", f"{LOUDNORM},aresample=48000",
+                    "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(tmp)], check=True, capture_output=True)  # loudnorm pads ~0.1 s
+    os.replace(tmp, path)
+
+
 def render_until_pass(src, edl, words, work, limits=None, encoder=None, facecam=None, max_retries=2, label="short"):
     """Render -> QC -> repair EDL -> re-render, up to max_retries repairs. -> (final edl, last QC report);
-    the render is work/short.mp4."""
+    the render is work/short.mp4. A too_quiet render first gets up to LOUDNESS_PASSES audio-only loudnorm passes."""
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     for attempt in range(max_retries + 1):
@@ -243,7 +214,14 @@ def render_until_pass(src, edl, words, work, limits=None, encoder=None, facecam=
         emit("stage", stage="render", msg=f"Rendering {label}" + (f" (repair {attempt})" if attempt else ""))
         renderer.render(src, edl, words, work / "short.mp4", work, encoder=encoder, facecam=facecam)
         # keep_dark (set by repair): the source itself is dark there, so blackdetect would only re-flag the content
-        report = qc.check(work / "short.mp4", **{**(limits or {}), **({"black_max": 1e6} if edl.get("keep_dark") else {})})
+        check = lambda: qc.check(work / "short.mp4", **{**(limits or {}), **({"black_max": 1e6} if edl.get("keep_dark") else {})})
+        report = check()
+        for n in range(LOUDNESS_PASSES):
+            if "too_quiet" not in report["problems"]:
+                break
+            emit("log", msg=f"QC too quiet ({report['mean_db']} dB): loudness repair {n + 1}/{LOUDNESS_PASSES} ({LOUDNORM})")
+            boost_loudness(work / "short.mp4")
+            report = check()
         emit("log", msg=f"QC {'PASS' if report['ok'] else 'FAIL ' + ','.join(report['problems'])}: "
                         f"{report['duration']}s, {report['mean_db']} dB, black {report['black']}")
         if report["ok"] or attempt == max_retries:
@@ -255,7 +233,8 @@ def render_until_pass(src, edl, words, work, limits=None, encoder=None, facecam=
 
 
 def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encoder=None, facecam=None, limits=None,
-              whisper_model="small.en", device="auto", max_retries=2, transcribe=None, caption_tone=None, music_gain_db=None, presets=PRESETS):
+              whisper_model=scorer.DEFAULT_WHISPER, device="auto", max_retries=2, transcribe=None, caption_tone=None, music_gain_db=None,
+              analyze=framing.analyze):
     """One clip -> ready_to_post/<video>_<clip>_short.mp4 + _post.json. -> result dict ("ok", "path", "qc", ...)."""
     manifest_path, out_dir = Path(manifest_path).resolve(), Path(out_dir)  # absolute: _post.json must work from any cwd
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -274,8 +253,10 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     words = scorer.fix_gaming_words(clip["words"], context)  # also fixes words cached by older runs
     words = snap_words_to_audio(words, director.energy(audio))  # the cache keeps Whisper's raw timings
 
-    facecam, how = pick_facecam(manifest, facecam, src, presets)
-    emit("log", msg=f"Facecam: {how}")
+    # faces (YuNet) every clip, no saved per-streamer boxes: a hand-set box (--facecam-box / SETTINGS) still wins
+    fr = analyze(src, words, facecam)
+    facecam = fr.get("cam_box")
+    emit("log", msg=f"Framing: {fr['layout']} ({fr['why']})" + ("; the source has burned-in captions, ours off" if fr.get("source_captions") else ""))
     online = bool(model) and scorer.ollama_online()
     model = scorer.resolve_model(model) if online else model
     meta = dict(manifest.get("twitch") or {"title": manifest.get("title")},  # + the judge's read, for the director
@@ -283,7 +264,7 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     music = renderer.MUSIC_DIR.exists() and any(p.suffix.lower() in (".mp3", ".wav") for p in renderer.MUSIC_DIR.iterdir())
     emit("stage", stage="edit", msg="Directing" + (f" with {model}" if online else " (heuristic, Ollama offline)"))
     edl = director.direct(words, audio, duration, model=model if online else None, meta=meta,
-                          has_facecam=bool(facecam), music=music)
+                          framing=fr, music=music)
     if caption_tone:  # SETTINGS caption theme: one colour instead of per-word tones
         edl["caption_tone"] = caption_tone
     if music_gain_db is not None:
@@ -315,11 +296,37 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
             "credit": {k: meta.get(k) for k in ("broadcaster_name", "creator_name", "view_count", "url") if meta.get(k)},
             "source": {"manifest": str(manifest_path), "clip_id": clip["clip_id"], "file": clip["file"]},
             "qc": {k: report[k] for k in ("duration", "mean_db", "bytes")}}
+    post.update(post_card(clip, post))
     (out_dir / f"{stem}_post.json").write_text(json.dumps(post, indent=2, ensure_ascii=False), encoding="utf-8")
+    if post.get("title_angles"):
+        (out_dir / f"{stem}_post.txt").write_text(card_text(post), encoding="utf-8")
     shutil.rmtree(work, ignore_errors=True)
-    emit("short", path=str(short), post=str(out_dir / f"{stem}_post.json"), title=edl["social_title"],
+    emit("short", path=str(short), post=str(out_dir / f"{stem}_post.json"), title=post["social_title"],
          archetype=edl["archetype"], duration=report["duration"], video_id=manifest.get("video_id"), clip_id=clip["clip_id"])
     return {"ok": True, "path": str(short), "qc": report, "edl": edl}
+
+
+def post_card(clip, post):
+    """The approved clip's 14B metadata (clipper: scorer.ollama_metadata) over the director's title: title angles,
+    5 hashtags (they replace the director's 4) and the pinned-comment line. {} when the clip has none (Ollama was off)."""
+    angles, tags = list(clip.get("title_angles") or []), list(clip.get("hashtags") or [])
+    out = {k: v for k, v in (("title_angles", angles), ("pinned_comment", clip.get("pinned_comment"))) if v}
+    if tags:
+        out["hashtags"] = tags
+    if angles:
+        out["title"] = angles[0]
+    if angles or tags:
+        out["social_title"] = f"{out.get('title', post['title'])} {' '.join(tags or post['hashtags'])}".strip()
+    return out
+
+
+def card_text(post):
+    """The plain-text post card next to the short (copy-paste ready)."""
+    lines = ["TITLE ANGLES:"] + [f"  {i}. {t}  ({len(t)} chars)" for i, t in enumerate(post.get("title_angles", []), 1)]
+    lines += ["", "HASHTAGS: " + " ".join(post.get("hashtags", []))]
+    if post.get("pinned_comment"):
+        lines += ["", "PINNED COMMENT: " + post["pinned_comment"]]
+    return "\n".join(lines) + "\n"
 
 
 def parse_box(text):
@@ -351,7 +358,7 @@ def main():
     ap.add_argument("--encoder", choices=["h264_nvenc", "h264_vaapi", "libx264"], help="default: auto-detect")
     ap.add_argument("--ollama-model", default=DEFAULT_MODEL)
     ap.add_argument("--no-ollama", action="store_true")
-    ap.add_argument("--whisper-model", default="small.en")
+    ap.add_argument("--whisper-model", default=scorer.DEFAULT_WHISPER)
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     ap.add_argument("--caption-theme", choices=sorted(THEMES), help="one caption colour (default: per-word tones by scenario)")
     ap.add_argument("--music-gain", type=float, help="background music gain in dB (default -22)")

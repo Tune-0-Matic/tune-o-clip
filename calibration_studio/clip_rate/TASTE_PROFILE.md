@@ -65,6 +65,18 @@ awkward_irl), captions, SFX.
   colour / position for a second speaker is wanted (B1 x1; the old opt-in feature was removed in v9: revisit if
   this recurs).
 - Grey screen on a scary moment was liked. (B1 x1)
+- **Loud wordless action is not dead air:** a gap between words is kept when its audio is >= 0.2 of the clip's
+  loudest (up to 5 s); quiet pauses stay jump-cut. (BM: 10/10 shorts keep 1.9 s max gaps, ours 0.8 s; on our raw
+  clips 13 of 93 trimmed gaps were loud) -> director.loud_gap / speech_segments(env=)
+- **No short under 15 s** when the source has 15 s (trimmed pauses / earlier setup come back first). (BM: no 10/10
+  short under 15.3 s, 5 of our 20 at 8.5-12 s; B1 duration r = +0.17) -> director.TARGET_MIN
+- **A picture change at least every 2.7 s, the first by 1.1 s** (1.2x snap punch on a word start; chat_roast,
+  unfiltered_chaos, confident_fail only). (BM: 10/10 every 2.7 s vs ours 4.4 s) -> director.pace_punches
+- Benchmark rules NOT adopted because my ratings disagree: a long aftermath after the climax (10/10s keep ~12 s,
+  B1 says end soon after the payoff) and "more loud beats" (r = -0.11 / -0.21 with my B1 ratings).
+
+Evidence tag (BM) = the 2026-11-15 benchmark of 20 reference 10/10 Shorts vs 20 of ours (workspace/UPGRADE_PLAN.md).
+My own ratings outrank (BM): a later batch that contradicts a (BM) rule supersedes it.
 - **Archetype matters less than framing and timing so far:** 1 "Wrong Archetype" tag in 35 (31 were chat_roast).
   The scenario is picked by director.classify() rules; the Ollama model's per-scenario fit is only recorded
   (scenario_fit), because asked to pick it collapsed to one scenario in all three prompt wordings tried.
@@ -96,6 +108,7 @@ One entry per batch: date, batch size, human vs AI correlation before and after,
 | date | clips | correlation before | correlation after | code changes |
 |---|---|---|---|---|
 | 2026-11-14 | 35 | 0.14 | 0.23 | judge rubric, CaseOh prior, outburst/teaser/SFX placement, tail 1.2 s, no banner, captions higher, facecam per-clip check (details below) |
+| 2026-11-15 | benchmark 20 vs 20 (no new ratings) | - | - | loud gaps kept, 15 s floor, pacing punches; scorer unchanged (details below) |
 
 ### 2026-11-14 (batch 1, 35 clips from calibration run 2026-11-14)
 - **Correlation:** before r = 0.14 (stored judge). After r = 0.23 = a fresh Ollama run of the new judge prompt
@@ -118,3 +131,40 @@ One entry per batch: date, batch size, human vs AI correlation before and after,
     wins for that clip (preset kept); DETECT_EVERY_CLIP = {"lospollostv"} never saves/uses a preset.
   - Tests updated: test_scorer (prior, prompt wording), test_editor (outburst placement, SFX gate, tail cap,
     facecam rules, MarginV).
+
+### 2026-11-15 (benchmark: 20 reference 10/10 Shorts vs our 20 newest; no new ratings)
+- **Correlation:** not re-scored. Editing changes need new renders + the next batch's ratings. A/B renders of 3 clips
+  are in output/ab_test/ (old vs new).
+- **Code changes:**
+  - editor/director.py: `loud_gap()` + `speech_segments(env=)` keep loud wordless gaps (every scenario but
+    unfiltered_chaos); `TARGET_MIN = 15.0` floor for the edit (MIN_LEN 8.5 stays the QC/repair floor);
+    `pace_punches()` adds 1.2x snap punch-ins so no still stretch exceeds 2.7 s (first by 1.1 s), on word starts.
+  - backend/scorer.py: unchanged. The one selection signal (loud-beat count) anti-correlates with my B1 ratings.
+  - Tests: test_editor (loud vs quiet gaps, 15 s floor, punch cadence, awkward_irl stays calm).
+
+### 2026-11-15 (editor rebuild on my request: framing, captions, pacing; no new ratings)
+- **Supersedes (my explicit request):** the (BM) "loud wordless gaps up to 5 s" and "no short under 15 s" rules, the
+  per-streamer facecam presets, awkward_irl's 3 s holds. Dead silence > 0.35 s is now always cut.
+- **Code changes:**
+  - editor/framing.py (new): YuNet face detection on 2 fps samples -> split_stack only for one small, steady corner
+    face (crop centred on it, head + headset inside), face_crop (9:16 column following the faces) or blur_fill; a
+    PP-OCRv3 text detector spots captions burned into the stream -> ours off and the frame shown once (blur_fill).
+    The Haar/overlay-edge webcam guesser and workspace/facecam_presets.json are gone.
+  - editor/director.py: keep_spans() = words + Silero VAD + loud reactions, silences > 0.35 s cut, 0.1 s pad; no
+    forced chat_roast end / outburst window or confident_fail silent aftermath; teaser = the climax's own sound;
+    zooms / takeovers only in split_stack.
+  - editor/pipeline.py: word ends snap back to the last audible frame (Whisper stretched words over silence).
+  - editor/renderer.py: face_crop layout, one caption track (none when the source has its own), 1-4 word chunks,
+    side margins 140 px.
+
+### 2026-11-15 (retention stack on my request; no new ratings)
+- editor/director.py `choreograph()`: snap punch-ins (1.35x climax / 1.3x yells / 1.22x "!" "?" lines, held to the
+  next sentence, -16 dB whoosh each), 1.12x push-ins so nothing sits still > 3 s, 0.25 s +-8 px shake on yells, -14 dB
+  thud (new clean `thud` SFX) on the climax, 1.2-1.5 s cold open of a loud second-half climax on clips >= 16 s (1.25x,
+  white flash + whoosh, not horror). Supersedes the per-scenario 1.45x / 1.65x zooms and the vine boom / metal pipe /
+  sad violin SFX; the record scratch stays (-14 dB).
+- editor/framing.py `zoom_room()`: every zoom grows about a head-safe anchor and stops before a head (or the stream's
+  own caption line) leaves the panel; face_crop and blur_fill zoom again (capped), so the earlier "no zooms on IRL
+  frames" rule is superseded by the cap.
+- editor/renderer.py: 1-3 word lines, active word pops 118% -> 100% in 70 ms, yellow / cyan on hype + loud words,
+  outline 4, shadow 3.

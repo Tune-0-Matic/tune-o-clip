@@ -19,6 +19,15 @@ import twitch_api
 
 tmp = Path(tempfile.mkdtemp())
 quiet = lambda: contextlib.redirect_stdout(io.StringIO())
+import history  # noqa: E402
+import os  # noqa: E402
+os.environ["TOC_HISTORY"] = str(tmp / "posted_history.json")  # child processes too: never the real file
+history.HISTORY = tmp / "posted_history.json"
+real_remember = history.remember
+history.remember = lambda *a, **k: None  # the checks below re-run one clip many times; the 30-day guard is tested at the end
+CARD = {"title_angles": ["He came back in the dinosaur suit and chat lost it", "Nobody expected the dinosaur suit to come back"],
+        "hashtags": ["#streamer1", "#dinosaur", "#funny", "#shorts", "#twitch"], "pinned_comment": "Would you have kept a straight face?"}
+scorer.ollama_metadata = lambda c, model, streamer=None: dict(CARD)
 
 
 class Resp(io.BytesIO):
@@ -506,4 +515,34 @@ assert got == {"twitch_done1", "twitch_a", "twitch_b", "twitch_noVod", "twitch_o
 assert "a2 is the same moment as a clip already picked" in log.getvalue()
 assert qw.same_moment({"video_id": "vod9", "vod_offset": 1030}, [("vod9", 1000)]) and \
     not qw.same_moment({"video_id": "vod9", "vod_offset": 1031}, [("vod9", 1000)])
+# --- 30-day duplicate guard (posted_history.json) + the approved clip's post card -------------------------------------
+history.remember = real_remember
+history.HISTORY.unlink(missing_ok=True)
+args.auto_edit, args.min_score, args.twitch_meta = False, 0, json.dumps(meta)
+scorer.ollama_online = lambda url="": True
+scorer.ollama_judge = lambda cands, model: {0: dict(VERDICT)}
+args.no_ollama = False
+calls.clear()
+with quiet() as out:
+    assert clipper.twitch_clip(args, info, job) == 0
+c = json.loads((job / "clips_manifest.json").read_text())["clips"][0]
+assert c["title_angles"] == CARD["title_angles"] and c["hashtags"] == CARD["hashtags"] and c["pinned_comment"], c
+h = history.load()
+assert [x["clip_id"] for x in h["clips"]] == ["FunnyClip1"] and h["clips"][0]["streamer"] == "streamer1", h
+n = len(calls)
+with quiet() as out:
+    assert clipper.twitch_clip(args, info, job) == 0
+assert "Already processed in the last 30 days (clip FunnyClip1)" in out.getvalue() and len(calls) == n, "skipped before downloading"
+assert json.loads((job / "clips_manifest.json").read_text())["clips"] == []
+args.twitch_meta = json.dumps(dict(meta, clip_id="OtherViewerClip"))  # another viewer clipped the same moment
+with quiet() as out:
+    clipper.twitch_clip(args, info, job)
+assert "Duplicate moment: transcript" in out.getvalue() and "(last 30 days)" in out.getvalue(), out.getvalue()
+history.update(lambda hh: hh["clips"][0].__setitem__("at", 0))  # the entry is over 30 days old now
+with quiet() as out:
+    assert clipper.twitch_clip(args, info, job) == 0
+assert json.loads((job / "clips_manifest.json").read_text())["clips"], "after 30 days the moment is fair game again"
+assert len(history.load()["clips"]) == 1, "expired entries are pruned on the next write"
+# local uploads (no metadata) are yours: never blocked or recorded
+assert history.seen(clip_id="local_upload") is None
 print("twitch ok")

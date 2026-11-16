@@ -3,4 +3,4 @@ yt-dlp-ejs
 deno
 numpy
 faster-whisper
-opencv-python-headless>=4.10,<5  # editor facecam detection (5.x dropped the Haar cascades)
+opencv-python-headless>=4.10,<5  # editor/framing.py: YuNet faces + PP-OCR text detector (editor/models/*.onnx)

@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "backend"))
+import history as ledger  # noqa: E402  (posted_history.json: atomic merge writes + the 30-day duplicate guard)
 READY, POSTED = ROOT / "ready_to_post", ROOT / "posted"
 HISTORY = ROOT / "workspace" / "posted_history.json"
 INTERVAL_H = 3.5  # a small account posting every 3.5 h stays clear of spam throttling
@@ -43,8 +45,8 @@ def load_history(path=HISTORY):
 
 
 def save_history(history, path=HISTORY):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(history, indent=2), encoding="utf-8")
+    """The posts only, merged into the file as it is now: the clipper's 30-day "clips" entries are never dropped."""
+    ledger.update(lambda h: h.update(posts=history["posts"]), path)
 
 
 def _done(history, platform):
@@ -80,9 +82,12 @@ def quality(post):
     return round(0.8 * _clip_score(post) + 0.1 * loud + 0.1 * (1.0 if 12 <= dur <= 50 else 0.5), 4)
 
 
-def candidates(ready=READY, history=None, platforms=("tiktok",)):
-    """Shorts in ready/ still missing on some enabled platform, best first; each with "todo" = those platforms."""
+def candidates(ready=READY, history=None, platforms=("tiktok",), now=None):
+    """Shorts in ready/ still missing on some enabled platform, best first; each with "todo" = those platforms.
+    A short whose transcript repeats one posted in the last 30 days (another short of the same moment) is left out."""
     history = history or {"posts": []}
+    now = time.time() if now is None else now
+    recent = [p for p in history["posts"] if now - float(p.get("posted_at", 0)) < ledger.WINDOW and p.get("transcript")]
     done = {pf: {p["short_id"] for p in _done(history, pf)} for pf in platforms}
     out = []
     for pj in sorted(Path(ready).glob("*_post.json")):
@@ -94,6 +99,11 @@ def candidates(ready=READY, history=None, platforms=("tiktok",)):
         try:
             post = json.loads(pj.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            continue
+        twin = next((p["short_id"] for p in recent if p.get("short_id") != sid
+                     and ledger.jaccard(post.get("transcript", ""), p["transcript"]) >= ledger.SIMILAR), None)
+        if twin:
+            emit("log", msg=f"[PUBLISH] {sid}: the same moment as {twin}, posted in the last 30 days: skipped")
             continue
         out.append({"id": sid, "short": short, "post_json": pj, "post": post, "quality": quality(post), "todo": todo,
                     "mtime": short.stat().st_mtime})
@@ -205,10 +215,10 @@ def run(dry_run=False, force=False, interval_h=INTERVAL_H, platforms=("youtube",
             sid = pj.name[:-len("_post.json")]
             if all(sid in h for h in have):
                 _move(sid, ready, posted)
-    pool = candidates(ready, history, platforms)
+    pool = candidates(ready, history, platforms, now)
     if short_id:
         force = True
-        pool = [c for c in pool + candidates(posted, history, platforms) if c["id"] == short_id][:1]
+        pool = [c for c in pool + candidates(posted, history, platforms, now) if c["id"] == short_id][:1]
         if not pool:
             emit("log", msg=f"[PUBLISH] {short_id}: already on {' + '.join(LABEL[pf] for pf in platforms)}, or its short is gone")
             return 0
@@ -245,7 +255,8 @@ def run(dry_run=False, force=False, interval_h=INTERVAL_H, platforms=("youtube",
             emit("error", msg=str(e) if str(e).startswith("[PUBLISH]") else f"[PUBLISH] {LABEL[pf]}: {e}")
             rc = 1
             continue
-        history["posts"].append({"short_id": best["id"], "platform": pf, "posted_at": now, "title": title, **res})
+        history["posts"].append({"short_id": best["id"], "platform": pf, "posted_at": now, "title": title,
+                                 "transcript": str(best["post"].get("transcript") or "")[:2000], **res})
         save_history(history, history_path)
         best["todo"].remove(pf)
         if not best["todo"] and not short_id:

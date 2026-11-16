@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
+import history  # noqa: E402
 import scorer
 
 # No --no-warnings: stderr is captured and only shown on failure, where warnings (e.g. cookie decryption) matter.
@@ -149,7 +150,7 @@ def make_transcriber(model_name, device, context=""):
     state = {}
 
     def load(dev):
-        model = WhisperModel(model_name, device=dev, compute_type="int8" if dev == "cpu" or scorer.LOW_SPEC else "auto",
+        model = WhisperModel(model_name, device=dev, compute_type="int8" if dev == "cpu" or scorer.LOW_SPEC else scorer.WHISPER_GPU_COMPUTE,
                              cpu_threads=4 if scorer.LOW_SPEC else 0)  # 4 of the i7-860's 8: the desktop stays usable
         state["dev"], state["model"], state["pipe"] = dev, model, BatchedInferencePipeline(model)
 
@@ -311,7 +312,8 @@ def recent_duplicate(streamer, text, roots, job, now=None, any_age=()):
 
 def write_manifest(job, info, clips, extra=None):
     keys = ("clip_id", "file", "start_sec", "end_sec", "duration", "setup_start_sec", "setup_end_sec", "score", "reason", "judge_reason", "transcript",
-            "llm", "pillars", "judge_reject", "vocal", "visual", "cue", "words")  # the full score breakdown (calibration_studio)
+            "llm", "pillars", "judge_reject", "vocal", "visual", "cue", "words",  # the full score breakdown (calibration_studio)
+            "title_angles", "hashtags", "pinned_comment")  # the approved clip's post card (scorer.ollama_metadata)
     manifest = {"video_id": info["id"], "title": info.get("title"), "url": info.get("webpage_url"), **(extra or {}),
                 "clips": [{k: c.get(k) for k in keys} for c in clips]}
     path = job / "clips_manifest.json"
@@ -329,6 +331,14 @@ def twitch_clip(a, info, job):
     duration = float(info.get("duration") or meta.get("duration") or 0)
     emit("log", msg=f"Twitch clip: {info.get('title')} by {meta.get('broadcaster_name')} "
                     f"({duration:.0f}s, {meta.get('view_count')} views)")
+    name = f"{'local' if info.get('local') else 'twitch'}_{meta.get('clip_id') or info['id']}"  # the queue's id for the clip = its output folder
+    scraped = not info.get("local") or bool(a.twitch_meta)  # the 30-day guard is for scraped clips, not your own uploads
+    again = history.seen(clip_id=meta.get("clip_id")) if scraped and meta.get("clip_id") else None
+    if again:  # processed in the last 30 days: not even downloaded
+        emit("log", msg=f"Already processed in the last 30 days ({again}), skipped")
+        write_manifest(job, info, [], {"source": "twitch", "twitch": meta, "duplicate_of": again, "rejected": []})
+        emit("done", manifest=str(archive(job, a, name)), count=0)
+        return 0
     online = not a.no_ollama and scorer.ollama_online()
     if online:
         threading.Thread(target=scorer.ollama_warmup, args=(a.ollama_model,), daemon=True).start()
@@ -348,13 +358,14 @@ def twitch_clip(a, info, job):
     lines = make_transcriber(a.whisper_model, a.device, context)(audio, [(0.0, duration)], words)[0]
     del audio
     text = scorer.transcript_between(lines, 0, duration)
-    name = f"{'local' if info.get('local') else 'twitch'}_{meta.get('clip_id') or info['id']}"  # the queue's id for the clip = its output folder
     own = [job] + ([Path(a.output) / name] if getattr(a, "output", None) else [])  # an earlier run of THIS clip
     dup = recent_duplicate(meta.get("broadcaster_name"), text, [OUTPUT, a.workspace], own, any_age=getattr(a, "dedup_root", ()))
-    if dup:  # another viewer clipped the same moment: don't judge or edit it twice
+    seen = history.seen(streamer=meta.get("broadcaster_name"), transcript=text) if scraped else None  # posted_history.json
+    if dup or seen:  # another viewer clipped the same moment: don't judge or edit it twice
         source.unlink(missing_ok=True)
-        emit("log", msg=f"Duplicate moment: {dup[1]:.0%} of the words match {dup[0]} (same streamer, last 24 h), skipped")
-        write_manifest(job, info, [], {"source": "twitch", "twitch": meta, "duplicate_of": dup[0], "rejected": []})
+        emit("log", msg=f"Duplicate moment: {dup[1]:.0%} of the words match {dup[0]} (same streamer, last 24 h), skipped" if dup
+             else f"Duplicate moment: {seen} (last 30 days), skipped")
+        write_manifest(job, info, [], {"source": "twitch", "twitch": meta, "duplicate_of": dup[0] if dup else seen, "rejected": []})
         emit("done", manifest=str(archive(job, a, name)), count=0)
         return 0
     cue, tag = scorer.cue_score(text)
@@ -377,6 +388,10 @@ def twitch_clip(a, info, job):
         out = job / "clip_01_twitch.mp4"
         source.replace(out)  # the clip IS the highlight: keep it whole, no re-cut
         c.update(clip_id=1, file=out.name)
+        if online:  # approved: title angles, 5 hashtags and a pinned-comment line for the post card
+            c.update(scorer.ollama_metadata(c, a.ollama_model, meta.get("broadcaster_name")))
+        if scraped:
+            history.remember(meta.get("clip_id") or name, meta.get("broadcaster_name"), text)
         emit("clip", **c)
         clips = [c]
     else:
@@ -405,7 +420,7 @@ def main():
     ap.add_argument("--no-gate", action="store_true", help="Twitch: keep the clip even when the judge rejects it or rates it "
                     "below --min-score (calibration_studio judges everything)")
     ap.add_argument("--cleanup-source", action="store_true", help="delete the full source video after cutting")
-    ap.add_argument("--whisper-model", default="small.en",
+    ap.add_argument("--whisper-model", default=scorer.DEFAULT_WHISPER,
                     help="faster-whisper model for the candidate transcripts (small.en, base.en = faster on CPU)")
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto", help="whisper device (auto = CUDA, else CPU)")
     ap.add_argument("--ollama-model", default=scorer.DEFAULT_MODEL,
@@ -511,6 +526,15 @@ def main():
         for i, v in (verdict or {}).items():
             scorer.apply_verdict(cands[i], v)
     best = scorer.rank_candidates(cands, a.clips, a.min_score)
+    streamer = info.get("uploader") or info.get("channel")
+    fresh = []
+    for c in best:  # the 30-day guard (posted_history.json): a moment kept or posted before is not cut again
+        why = history.seen(clip_id=f"{info['id']}_{int(c['start_sec'])}", streamer=streamer, transcript=c["transcript"])
+        if why:
+            emit("log", msg=f"Skipped {scorer.clock(c['start_sec'])}: already processed in the last 30 days ({why})")
+        else:
+            fresh.append(c)
+    best = fresh
     hard = scorer.rejected(cands)
     gated = sum(not scorer.passes_gate(c, a.min_score) for c in cands) - len(hard)
     if hard:
@@ -547,6 +571,9 @@ def main():
             cut(source, c["start_sec"], c["end_sec"], out)
             duration_s = c["end_sec"] - c["start_sec"]
         c.update(clip_id=i, file=out.name, duration=round(duration_s, 2))
+        if online:  # approved: title angles, 5 hashtags and a pinned-comment line for the post card
+            c.update(scorer.ollama_metadata(c, a.ollama_model, streamer))
+        history.remember(f"{info['id']}_{int(c['start_sec'])}", streamer, c["transcript"])
         emit("clip", **{k: v for k, v in c.items() if k != "lines"})
 
     write_manifest(job, info, best, {"source": "youtube", "channel": info.get("uploader_id") or info.get("channel_id"),

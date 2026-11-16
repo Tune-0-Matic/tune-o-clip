@@ -29,7 +29,7 @@ ROAST_RE = re.compile(r"\b(chat|bro|you'?re|stupid|dumb|ugly|imagine|ratio|liter
 DEFAULT_TONE = {"chat_roast": "roast", "unfiltered_chaos": "punch", "horror_jumpscare": "punch",
                 "confident_fail": "hype", "awkward_irl": "punch"}
 FONTS = {"chat_roast": "Arial Black", "unfiltered_chaos": "Impact", "horror_jumpscare": "Impact",
-         "confident_fail": "Arial Black", "awkward_irl": "Trebuchet MS"}
+         "confident_fail": "Arial Black", "awkward_irl": "Arial Black"}  # heavy sans only (kinetic Shorts captions)
 PROMPT = """You are the editor of viral vertical streamer shorts. Read this clip (the comedy judge's notes, the audio facts and
 the transcript with word timings in seconds) and rate how well EACH editing scenario fits it, from 0 (not at all) to 10:
 - chat_roast: calm talk or reading chat, then the streamer roasts or insults someone (CaseOh style).
@@ -74,20 +74,51 @@ def env_at(env, t, hop=HOP):
     return float(env[min(len(env) - 1, max(0, int(t / hop)))]) if env.size else 0.0
 
 
-def speech_segments(words, lo, hi, max_gap, pad=0.15):
-    """Keep-segments inside [lo, hi]: words grouped while the silence between them is <= max_gap."""
-    ws = [w for w in words if w["end"] > lo and w["start"] < hi]
-    if not ws:
+GAP = 0.35  # silence longer than this is cut (unfiltered_chaos: 0.25)
+PAD = 0.1  # kept before / after each sound: a cut opens <= 0.1 s before the first word or reaction
+REACT = 0.35  # >= 35% of the clip's loudest with no words = a laugh / scream / reaction: kept like speech
+
+
+def vad_speech(audio, sr=16000):
+    """Silero VAD speech spans (s), faster-whisper's bundled model: catches laughs and half-words Whisper drops."""
+    try:
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+    except ImportError:  # editor without faster-whisper: words + loud reactions still work
+        return []
+    ts = get_speech_timestamps(np.asarray(audio, dtype=np.float32), VadOptions(min_silence_duration_ms=200, speech_pad_ms=30),
+                               sampling_rate=sr)
+    return [(t["start"] / sr, t["end"] / sr) for t in ts]
+
+
+def loud_runs(env, hop=HOP, level=REACT, min_len=0.1):
+    """(start, end) s where the audio stays >= level (and >= 2.5x the clip's median: a constant game / music bed is
+    not a reaction) for >= min_len."""
+    level = max(level, 2.5 * float(np.median(env)))
+    runs, start = [], None
+    for i, v in enumerate(list(env) + [0.0]):
+        if v >= level and start is None:
+            start = i
+        elif v < level and start is not None:
+            if (i - start) * hop >= min_len:
+                runs.append((start * hop, i * hop))
+            start = None
+    return runs
+
+
+def keep_spans(lo, hi, words, speech=(), env=None, gap=GAP, pad=PAD, hop=HOP):
+    """Keep-segments inside [lo, hi]: words + VAD speech + loud reactions, merged across silences <= gap, each padded by
+    `pad`. Every silence longer than gap becomes a jump cut (replaces the old word-gap cutter that kept up to 1.5 s)."""
+    sounds = [(w["start"], w["end"]) for w in words] + list(speech) + (loud_runs(env, hop) if env is not None and len(env) else [])
+    sounds = sorted((max(lo, s), min(hi, e)) for s, e in sounds if e > lo and s < hi)
+    if not sounds:
         return [(lo, hi)]
-    segs, cur = [], [ws[0]["start"], ws[0]["end"]]
-    for w in ws[1:]:
-        if w["start"] - cur[1] > max_gap:
-            segs.append(cur)
-            cur = [w["start"], w["end"]]
+    out = [list(sounds[0])]
+    for s, e in sounds[1:]:
+        if s - out[-1][1] <= gap:
+            out[-1][1] = max(out[-1][1], e)
         else:
-            cur[1] = max(cur[1], w["end"])
-    segs.append(cur)
-    return [(round(max(lo, s - pad), 2), round(min(hi, e + pad), 2)) for s, e in segs]
+            out.append([s, e])
+    return [(round(max(lo, s - pad), 2), round(min(hi, e + pad), 2)) for s, e in out]
 
 
 def merge(cuts):
@@ -162,25 +193,9 @@ def tail_guard(cuts, env, duration, hop=HOP, level=0.35, limit=1.2):
     return cuts[:-1] + [(s, e)]
 
 
-TEASER_LEN, TEASER_MIN_CLIP, FREEZE_LEN = 2.2, 24.0, 0.8
+FREEZE_LEN = 0.8
 LOUD = 0.8  # a peak at >= 80% of the clip's loudest = a real yell / scream
 MIN_CLEAR_WORDS, SPIKE_RATIO = 4, 6.0  # skip_render: fewer clear words than this, and no peak >= 6x the median level
-
-
-def min_holds(cuts, hold=3.0):
-    """Merge cuts (and the gap between them) until every kept cut is at least `hold` seconds."""
-    cuts = [list(c) for c in cuts]
-    i = 0
-    while i < len(cuts) and len(cuts) > 1:
-        if cuts[i][1] - cuts[i][0] < hold:
-            j = i + 1 if i + 1 < len(cuts) else i - 1
-            lo, hi = sorted((i, j))
-            cuts[lo] = [cuts[lo][0], cuts[hi][1]]
-            cuts.pop(hi)
-            i = 0
-        else:
-            i += 1
-    return [tuple(c) for c in cuts]
 
 
 # --- scenario choice ---------------------------------------------------------------------------------------------
@@ -214,24 +229,15 @@ def classify(words, env, duration, hop=HOP):
     return "chat_roast"
 
 
-def word_tones(words, env, scenario, pivot=None):
-    """Caption emphasis tone per word: hype (green) / rage (red) / roast (cyan) / punch (yellow).
-    pivot: the fail/scare moment; after it confident_fail turns deadpan and horror turns red."""
+def word_tones(words, env, scenario=None, pivot=None):
+    """Active-word highlight: "roast" (cyan) on hype / rage / loud (>= 85% of the peak) words, "punch" (yellow) on the
+    rest: the two high-contrast Shorts caption colours. scenario / pivot are kept for callers; the tone no longer
+    depends on them."""
     out = []
     for w in words:
         bare = re.sub(r"[^\w']", "", w["word"]).lower()
-        loud = env_at(env, (w["start"] + w["end"]) / 2) >= 0.85
-        if HYPE_RE.match(bare):
-            tone = "hype"
-        elif loud or RAGE_RE.match(bare):
-            tone = "rage"
-        elif ROAST_RE.search(bare):
-            tone = "roast"
-        else:
-            tone = DEFAULT_TONE[scenario]
-            if pivot is not None and w["start"] >= pivot:
-                tone = {"confident_fail": "roast", "horror_jumpscare": "rage"}.get(scenario, tone)
-        out.append(tone)
+        loud = env_at(env, (w["start"] + w["end"]) / 2) >= yell_level(env)
+        out.append("roast" if loud or HYPE_RE.match(bare) or RAGE_RE.match(bare) else "punch")
     return out
 
 
@@ -285,95 +291,151 @@ def ollama_creative(words, duration, model, url="http://localhost:11434", timeou
 
 # --- EDL ----------------------------------------------------------------------------------------------------------
 
-def build_edl(scenario, words, env, duration, hop=HOP):
-    """Deterministic cuts / zooms / filters / takeovers / mutes / SFX for a scenario (all times in source seconds)."""
+SNAP_CLIMAX, SNAP_PEAK, SNAP_LINE = 1.35, 1.3, 1.22  # snap punch-ins: the climax, a big yell, a "!" / "?" line
+RAMP_SCALE, RAMP_LEN, STILL_MAX = 1.12, 3.5, 3.0  # slow push-ins wherever the picture would sit still for > 3 s
+SNAP_GAP = 2.0  # output s between two snap starts
+SHAKE = 0.85  # a vocal peak this loud (vs the clip's loudest) gets a 0.25 s micro shake; such words get cyan captions
+WHOOSH_DB, THUD_DB, SCRATCH_DB = -16.0, -14.0, -14.0  # SFX under the voice (the whole mix is loudnormed after)
+TEASER_LEN, TEASER_MIN, TEASER_MIN_CLIP, TEASER_ZOOM = 1.4, 1.2, 16.0, 1.25
+
+
+def yell_level(env):
+    """Loud enough to be a yell: >= SHAKE of the peak AND >= 2.5x the median (a constant game / music bed is no yell)."""
+    return max(SHAKE, 2.5 * float(np.median(env))) if len(env) else 1.0
+
+
+def out_map(cuts):
+    """(source -> output s, output -> source s, output length) over plain cuts.
+    shortcut: ignores speed ramps and the teaser (they shift a beat by a fraction of a second at most)."""
+    offs, acc = [], 0.0
+    for s, e in cuts:
+        offs.append(acc)
+        acc += e - s
+    out = lambda t: next((o + t - s for (s, e), o in zip(cuts, offs) if s <= t <= e), None)
+    src = lambda t: next((s + t - o for (s, e), o in zip(cuts, offs) if o <= t <= o + e - s), None)
+    return out, src, acc
+
+
+def choreograph(edl, words, env, climax, hop=HOP):
+    """The retention camera. Snap punch-ins on the climax (1.35x), every big yell (1.3x) and every "!" / "?" line
+    (1.22x), held until the next sentence starts (0.6-2.5 s), each with a soft whoosh; slow 1.0 -> 1.12x push-ins
+    over 3.5 s wherever the picture would otherwise sit still for more than 3 s. Zooms never overlap; the renderer
+    caps every one at the layout's head-safe zoom (framing.zoom_room)."""
+    out, src, length = out_map([(c["start"], c["end"]) for c in edl["cuts"]])
+    sentence = [o for o in (out(b["start"]) for a, b in zip(words, words[1:]) if a["word"].rstrip()[-1:] in ".!?") if o is not None]
+    cand = ([(climax, SNAP_CLIMAX)] if climax is not None else []) \
+        + [(q, SNAP_PEAK) for q in peaks(env, hop) if env_at(env, q, hop) >= yell_level(env)] \
+        + [(w["start"], SNAP_LINE) for w in words if w["word"].rstrip()[-1:] in "!?"]  # priority order
+    starts = []
+    for t, scale in cand:
+        o = out(t)
+        if o is not None and o < length - 0.6 and all(abs(o - a) >= SNAP_GAP for a, _ in starts):
+            starts.append((o, scale))
+    starts.sort()
+    snaps = []
+    for k, (o, scale) in enumerate(starts):
+        nxt = starts[k + 1][0] - 0.2 if k + 1 < len(starts) else length
+        hold = next((s for s in sentence if s > o + 0.3), o + 1.5) - o  # snap back on the next sentence
+        snaps.append((o, min(2.5, max(0.6, hold), nxt - o, length - o), scale))
+    zooms, a = [], 0.0
+    for o, d, scale in snaps + [(length, 0.0, 0.0)]:
+        while o - a > STILL_MAX:  # push in slowly through the still stretch before this snap
+            s0 = a + 0.3 if a else a
+            zooms.append((s0, min(RAMP_LEN, o - s0 - 0.3), RAMP_SCALE, "creep"))
+            a = s0 + zooms[-1][1]
+        if d > 0:
+            zooms.append((o, d, scale, "snap"))
+            edl["sfx"].append({"at": round(src(o), 2), "name": "whoosh", "gain_db": WHOOSH_DB})
+            a = max(a, o + d)
+    edl["zooms"] += [{"at": round(src(o), 2), "duration": round(d, 2), "scale": s, "style": st} for o, d, s, st in zooms]
+
+
+def build_edl(scenario, words, env, duration, hop=HOP, speech=()):
+    """Deterministic cuts / zooms / filters / takeovers / mutes / SFX for a scenario (all times in source seconds,
+    except the teaser's own effects: "out": True = output seconds, applied only while the teaser plays)."""
     pk = peaks(env, hop) or [duration / 2]
     p = pk[0]  # loudest moment
-    start = max(0.0, (words[0]["start"] if words else 0.0) - 0.25)  # trim leading dead air
+    keep = lambda hi, gap=GAP: keep_spans(0.0, hi, words, speech, env, gap)  # opens on the first sound, no dead air
     last_word_end = words[-1]["end"] if words else duration
     edl = {"scenario": scenario, "hook_teaser": {"enabled": False, "start": 0.0, "end": 0.0, "banner_text": ""},
            "cuts": [], "zooms": [], "filters": [], "takeovers": [], "mutes": [], "sfx": [], "speed": [],
            "bg_music": {"enabled": False, "gain_db": -22.0}}
-    zoom = lambda at, dur, scale, style: edl["zooms"].append(
-        {"at": round(max(0.0, at), 2), "duration": round(max(0.1, dur), 2), "scale": scale, "style": style})
     fx = lambda a, b, kind: edl["filters"].append({"start": round(max(0.0, a), 2), "end": round(min(duration, b), 2), "type": kind})
     sfx = lambda at, name, gain: edl["sfx"].append({"at": round(max(0.0, at), 2), "name": name, "gain_db": gain})
     pivot = None
 
-    if scenario == "chat_roast":  # calm setup -> pause + scratch -> ramp zoom + vine boom -> snap + reaction boost on the outburst
+    if scenario == "chat_roast":  # calm setup -> pause + scratch -> reaction boost on the outburst
         # The clip runs to its LAST peak (stories keep going), but the outburst = the LOUDEST peak after the setup.
-        # Batch 1: the latest peak was often a mild one (0.60-0.78), so the scratch / boom / teaser hit "nothing
+        # Batch 1: the latest peak was often a mild one (0.60-0.78), so the scratch / teaser hit "nothing
         # happening" while the real yell came earlier ("that yell should've been the intro teaser").
         late = max([q for q in pk if q >= duration * 0.3] or [p])
         o = next((q for q in pk if q >= duration * 0.3), p)
         end = min(duration, late + 1.6)
-        cuts = speech_segments(words, start, end, max_gap=0.7)
-        cuts[-1] = (cuts[-1][0], end)
-        cuts = merge(cuts + [(max(0.0, o - 0.6), min(duration, o + 0.9))])  # a wordless yell must survive the trim
+        cuts = keep(end)  # a wordless yell survives as a loud run; no forced end / outburst window (they kept dead air)
         pause = max(cuts[0][0], o - 1.8)
-        zoom(pause + 0.35, o - pause - 0.35, 1.45, "ramp")
-        if env_at(env, o) >= LOUD:  # SFX only on a real yell: on a quiet "outburst" they looked artificial
+        if env_at(env, o) >= LOUD:  # the scratch only on a real yell: on a quiet "outburst" it looked artificial
             edl["mutes"].append({"start": round(pause, 2), "end": round(pause + 0.35, 2)})
-            sfx(pause, "record_scratch", -6.0)
-            sfx(pause + 0.35, "vine_boom", -5.0)
-        zoom(o, 0.9, 1.65, "snap")
+            sfx(pause, "record_scratch", SCRATCH_DB)
         fx(o, o + 0.9, "reaction_boost")
-        fx(o, o + 0.3, "trauma_shake")
         pivot = o
-    elif scenario == "unfiltered_chaos":  # ultra-tight jump cuts, takeovers + glitch on every peak, layered SFX
-        cuts = speech_segments(words, start, duration, max_gap=0.25, pad=0.08)
+    elif scenario == "unfiltered_chaos":  # ultra-tight jump cuts, facecam takeovers + glitch on every peak
+        cuts = keep(duration, 0.25)
         for q in pk[:6]:
             if not any(s <= q <= e for s, e in cuts):
                 cuts.append((max(0.0, q - 0.6), min(duration, q + 0.6)))
         cuts = merge(cuts)
         for q in sorted(pk[:4]):
             edl["takeovers"].append({"start": round(max(0.0, q - 0.3), 2), "end": round(min(duration, q + 1.2), 2)})
-            zoom(q - 0.05, 0.5, 1.4, "snap")
-            if env_at(env, q) >= 0.8:
-                fx(q, q + 0.25, "trauma_shake")
+            if env_at(env, q) >= LOUD:
                 fx(q, q + 0.07, "rgb_split")
-        sfx(p, "vine_boom", -6.0)
-        sfx(p, "bass_boost", -9.0)
-        if len(pk) > 1:
-            sfx(pk[1], "metal_pipe", -8.0)
-    elif scenario == "horror_jumpscare":  # dark creep in the quiet -> flash + shake + takeover on the scare, cut after it
+    elif scenario == "horror_jumpscare":  # dark vignette in the quiet -> flash + takeover on the scare, cut after it
         end = min(duration, p + SCREAM_CUT)
-        cuts = speech_segments(words, start, end, max_gap=1.5)
+        cuts = keep(end)
         cuts[-1] = (cuts[-1][0], end)
         fx(cuts[0][0], p, "vignette")
-        zoom(cuts[0][0], max(1.0, p - cuts[0][0]), 1.15, "creep")
         fx(p, p + 0.07, "flash")  # ~2 frames
-        fx(p, p + 0.35, "trauma_shake")
         edl["takeovers"].append({"start": round(max(0.0, p - 0.1), 2), "end": round(end, 2)})
         pivot = p
-    elif scenario == "confident_fail":  # sped-up confident setup -> scratch at the fail -> grayscale + sad violin
+    elif scenario == "confident_fail":  # sped-up confident setup -> scratch at the fail -> grayscale aftermath
         f = p
-        end = min(duration, f + 2.2)  # keep the aftermath
-        cuts = speech_segments(words, start, f, max_gap=0.6) + [(f, end)]
-        cuts = merge(cuts)
+        end = min(duration, f + 2.2)  # the aftermath: its reactions are kept, its silences cut like everywhere else
+        cuts = keep(end)
         edl["speed"].append({"start": round(cuts[0][0], 2), "end": round(f, 2), "factor": 1.15})
-        sfx(f, "record_scratch", -5.0)
+        sfx(f, "record_scratch", SCRATCH_DB)
         edl["mutes"].append({"start": round(f + 0.05, 2), "end": round(f + 0.4, 2)})
-        sfx(f + 0.3, "sad_violin", -9.0)
         fx(f, end, "grayscale")
-        zoom(f, end - f, 1.12, "creep")
         pivot = f
-    else:  # awkward_irl: long unhurried holds, slow drift, dry SFX only
-        cuts = speech_segments(words, start, min(duration, last_word_end + 0.6), max_gap=1.5)
-        cuts = min_holds(cuts, 3.0)
-        zoom(cuts[0][0], max(1.0, cuts[-1][1] - cuts[0][0]), 1.06, "drift")
-        sfx(p, "vine_boom" if env_at(env, p) >= 0.8 else "pop", -9.0)
+    else:  # awkward_irl: unhurried, the deadpan line gets the thud
+        cuts = keep(min(duration, last_word_end + 0.6))
 
     horror = scenario == "horror_jumpscare"
     cuts = merge(cuts) if horror else tail_guard(merge(cuts), env, duration, hop)  # horror's hard cut is the point
-    # MIN_LEN is for the rendered short: a 1.15x speed ramp plays 8.5 s of source in 7.4 s, so pad by the fastest ramp
+    # the floor is for the rendered short: a 1.15x speed ramp plays 8.5 s of source in 7.4 s, so pad by the fastest ramp
     fitted = fit_length(cuts, duration, MIN_LEN * max([sp["factor"] for sp in edl["speed"]] or [1.0]))
     edl["cuts"] = [{"start": s, "end": e} for s, e in word_safe([(c["start"], c["end"]) for c in fitted], words, duration, horror)]
-    # flash-forward hook on long clips whose climax comes late (the payoff is far away): 2.2 s of the climax first
-    if scenario in ("chat_roast", "confident_fail") and pivot is not None and duration > TEASER_MIN_CLIP \
-            and pivot >= 0.65 * duration and total([(c["start"], c["end"]) for c in edl["cuts"]]) + TEASER_LEN <= MAX_LEN:
-        a = max(0.0, min(pivot - 1.0, duration - TEASER_LEN))
-        edl["hook_teaser"] = {"enabled": True, "start": round(a, 2), "end": round(a + TEASER_LEN, 2), "banner_text": "WAIT FOR IT..."}
+    climax = pivot if pivot is not None else p
+    for q in pk:  # micro shake synced to every scream
+        if env_at(env, q, hop) >= yell_level(env):
+            fx(q, q + 0.25, "trauma_shake")
+    sfx(climax, "thud", THUD_DB)  # the low-end hit on the main punchline / deadpan line
+    choreograph(edl, words, env, climax, hop)
+    # cold open: 1.2-1.5 s of a loud second-half climax first (punched in, whoosh + white flash), then hard cut to the
+    # setup. Not for horror: showing the scare first kills the jump.
+    if not horror and duration >= TEASER_MIN_CLIP and climax >= 0.5 * duration and env_at(env, climax, hop) >= LOUD \
+            and total([(c["start"], c["end"]) for c in edl["cuts"]]) + TEASER_LEN <= MAX_LEN:
+        a = max(0.0, climax - 0.5)
+        b = min(duration, a + TEASER_LEN)
+        home = next((c for c in edl["cuts"] if c["start"] <= climax <= c["end"]), None)
+        if home:  # only the climax's own sound, never the silence around it
+            a, b = max(a, home["start"]), min(b, home["end"])
+        grow = max(0.0, TEASER_MIN - (b - a)) / 2  # a short yell still opens for 1.2 s (<= 0.1 s past it per side)
+        a, b = max(0.0, a - grow), min(duration, b + grow)
+        if b - a >= TEASER_MIN - 0.01:
+            T = round(b - a, 2)
+            edl["hook_teaser"] = {"enabled": True, "start": round(a, 2), "end": round(b, 2), "banner_text": "WAIT FOR IT..."}
+            edl["zooms"].append({"at": 0.0, "duration": T, "scale": TEASER_ZOOM, "style": "snap", "out": True})
+            edl["filters"].append({"start": max(0.0, T - 0.04), "end": T + 0.06, "type": "flash", "out": True})
+            edl["sfx"].append({"at": round(max(0.0, T - 0.25), 2), "name": "whoosh", "gain_db": WHOOSH_DB, "out": True})
     if scenario == "confident_fail":
         edl["freeze_end"] = FREEZE_LEN  # hold the last (grey) frame on the fail
     # pre-render sanity: a trim that keeps almost no real words and no loud action moment is fragments, not a short
@@ -388,17 +450,18 @@ def build_edl(scenario, words, env, duration, hop=HOP):
     return edl
 
 
-def direct(words, audio, duration, sr=16000, model=None, meta=None, has_facecam=False, music=False, opener=None):
+def direct(words, audio, duration, sr=16000, model=None, meta=None, framing=None, music=False, opener=None):
     """Full EDL for one clip. The scenario is always the rule-based classify(): on the 40 shorts of the 2026-11-14 run
     the 3B model, however it was asked (name one / judge-aware wording / 0-10 fit per scenario), filed 27-34 of 40
     clips under a single scenario, a different one per wording; classify() used all five (25/8/3/2/2) and its rules
     are code that rating batches can tune. Ollama writes the title / hashtags / banner (model=None or offline ->
-    heuristic ones) and its fit scores are kept as scenario_fit for that calibration."""
+    heuristic ones) and its fit scores are kept as scenario_fit for that calibration.
+    framing = framing.analyze() (layout / track / source_captions); None = blur_fill, our captions."""
     env = energy(audio, sr)
     scenario = classify(words, env, duration)
     ai = ollama_creative(words, duration, model, opener=opener, context=clip_context(meta, words, env, duration)) \
         if model and words else None
-    edl = build_edl(scenario, words, env, duration)
+    edl = build_edl(scenario, words, env, duration, speech=vad_speech(audio, sr))
     creative = heuristic_creative(words, scenario, meta)
     fallback_tags = creative["hashtags"]
     creative.update({k: v for k, v in (ai or {}).items() if v and k != "fit"})
@@ -406,9 +469,19 @@ def direct(words, audio, duration, sr=16000, model=None, meta=None, has_facecam=
     creative["hashtags"] = (creative["hashtags"] + [t for t in fallback_tags if t.lower() not in seen])[:4]
     if edl["hook_teaser"]["enabled"]:
         edl["hook_teaser"]["banner_text"] = creative["banner_text"]
-    # awkward IRL keeps clean blur_fill framing; everything else stacks the facecam when there is one
-    edl["layout"] = "split_stack" if has_facecam and scenario != "awkward_irl" else "blur_fill"
-    if edl["layout"] != "split_stack":
+    fr = framing or {}
+    layout = fr.get("layout") or "blur_fill"
+    if layout == "split_stack" and scenario == "awkward_irl":  # awkward IRL keeps clean blur_fill framing (B1)
+        layout = "blur_fill"
+    # the stream's own captions: show the frame ONCE. A 9:16 column cuts them in half, and split_stack showed them twice
+    # (live: Jynxzi's "dropped" in both the webcam crop and the gameplay panel)
+    if fr.get("source_captions"):
+        layout = "blur_fill"
+    edl["layout"], edl["source_captions"] = layout, bool(fr.get("source_captions"))  # theirs on screen: ours off
+    edl["crop_track"] = [list(k) for k in fr.get("track") or []] if layout == "face_crop" else []
+    # zooms grow from the heads' top and stop where a head (or the stream's caption line) would leave the frame
+    edl["zoom_anchor"] = list((fr.get("zoom") if layout == fr.get("layout") else fr.get("zoom_full")) or [0.5, 0.5, 1.35])
+    if layout != "split_stack":
         edl["takeovers"] = []  # no webcam to take over with
     edl.update(archetype=scenario, title=creative["social_title"], hashtags=creative["hashtags"][:4],
                social_title=f"{creative['social_title']} {' '.join(creative['hashtags'][:4])}".strip(),

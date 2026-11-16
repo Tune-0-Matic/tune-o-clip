@@ -118,13 +118,9 @@ def edit_all(batch, edit, on_done=None):
 def default_edit(batch, settings):
     """editor/pipeline.edit_clip with the panel's settings (like the live --auto-edit), writing into the batch."""
     import argparse as _a
-    import shutil
     sys.path.insert(0, str(ROOT / "editor"))
     import pipeline
     import renderer
-    presets = batch / "facecam_presets.json"  # learned boxes stay in the batch; start from the live ones
-    if not presets.exists() and pipeline.PRESETS.exists():
-        shutil.copy(pipeline.PRESETS, presets)
     box = str(settings.get("facecam_box", "auto")).strip()
     try:
         box = pipeline.parse_box(box) if box not in ("", "auto") else None
@@ -134,8 +130,8 @@ def default_edit(batch, settings):
     emit("log", msg=f"Encoder: {enc[0]}")
     return lambda m, cid, out: pipeline.edit_clip(
         m, cid, out, settings.get("ollama_model") or pipeline.DEFAULT_MODEL, enc, box,
-        whisper_model=settings.get("whisper_model") or "small.en", caption_tone=pipeline.THEMES.get(settings.get("caption_theme")),
-        music_gain_db=settings.get("music_gain_db"), presets=presets)
+        whisper_model=settings.get("whisper_model") or scorer.DEFAULT_WHISPER, caption_tone=pipeline.THEMES.get(settings.get("caption_theme")),
+        music_gain_db=settings.get("music_gain_db"))
 
 
 # --- decision trace ------------------------------------------------------------------------------------------------

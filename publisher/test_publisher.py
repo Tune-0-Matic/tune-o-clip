@@ -521,4 +521,27 @@ for pf in ("youtube", "tiktok", "both"):  # no API keys needed, nothing moved
     cli = subprocess.run([sys.executable, str(Path(scheduler.__file__)), "--dry-run", "--platform", pf],
                          capture_output=True, text=True, timeout=60)
     assert cli.returncode == 0 and any(e["event"] == "log" for e in events(cli.stdout)), cli.stdout + cli.stderr
+
+# 30-day guard: a short of a moment posted in the last 30 days is left out; the same short still goes to another platform
+g = tmp / "guard"
+g.mkdir()
+same = "he walked straight into the wall and then blamed chat for it again"
+for sid, words in (("a_1", same), ("b_1", same + " lol"), ("c_1", "a totally different clip about cooking pasta at midnight")):
+    (g / f"{sid}_post.json").write_text(json.dumps({"title": sid, "transcript": words, "duration": 20, "hashtags": []}))
+    (g / f"{sid}_short.mp4").write_bytes(b"x")
+gh = {"posts": [{"short_id": "a_1", "platform": "youtube", "posted_at": time.time() - 86400, "status": "UPLOADED", "transcript": same}]}
+with contextlib.redirect_stdout(io.StringIO()) as glog:
+    ids = {c["id"] for c in scheduler.candidates(g, gh, ("tiktok",))}
+assert ids == {"a_1", "c_1"}, ids  # a_1 still owed to TikTok; b_1 is the same moment as the posted a_1
+assert "b_1: the same moment as a_1" in glog.getvalue()
+gh["posts"][0]["posted_at"] = time.time() - 31 * 86400
+with contextlib.redirect_stdout(io.StringIO()):
+    assert "b_1" in {c["id"] for c in scheduler.candidates(g, gh, ("tiktok",))}, "after 30 days it may go out"
+# save_history keeps the clipper's "clips" entries written meanwhile (one file, two writers)
+hp = tmp / "merge.json"
+hp.write_text(json.dumps({"posts": [], "clips": [{"clip_id": "x", "streamer": "s", "at": time.time(), "transcript": "t"}]}))
+scheduler.save_history({"posts": [{"short_id": "p1", "posted_at": 1}]}, hp)
+saved = json.loads(hp.read_text())
+assert saved["clips"][0]["clip_id"] == "x" and saved["posts"][0]["short_id"] == "p1", saved
+
 print("publisher ok")

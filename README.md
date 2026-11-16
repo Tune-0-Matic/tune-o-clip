@@ -178,35 +178,41 @@ python backend/queue_worker.py ... --drain --auto-edit      # every finished vid
 python backend/clipper.py URL --auto-edit                    # single runs too
 ```
 1. **Words:** faster-whisper `word_timestamps` on the clip *file*, cached as `words` in `clips_manifest.json`.
-2. **Facecam:** per-streamer presets in `workspace/facecam_presets.json` (`{"caseoh_": [x, y, w, h]}`, keyed by the
-   Twitch login or YouTube channel): an explicit box (`--facecam-box` / SETTINGS) wins and is saved for that streamer,
-   else the saved preset is used, else detection runs and a hit is saved. (Its own file: the panel rewrites
-   `settings.json` from memory and would drop keys added during a run.) Detection: OpenCV's frontal-face Haar cascade on 5 sampled frames; a face near a frame edge at the same spot in
-   >= 3 frames is a webcam overlay (game faces move). The box snaps to the overlay's own border (edges that stay put
-   across frames), else it's estimated from the face size. `--facecam-box x,y,w,h` (0..1) overrides.
+2. **Framing** (`framing.py`, every clip, 2 fps samples): faces from OpenCV YuNet (`editor/models/`, 230 KB) decide
+   the layout. One small, steady face near a frame edge with no other comparable face = a webcam over gameplay ->
+   `split_stack`, top panel centred on that face with headroom. Faces that fit one 9:16 column -> `face_crop` (a
+   full-height column that smoothly follows them). Faces too far apart, or none -> `blur_fill`. A PP-OCRv3 text
+   detector (2.4 MB) spots captions already burned into the stream (a wide, centred, changing line low in the frame
+   while someone talks): then ours are off and `face_crop` becomes `blur_fill` so theirs stay whole.
+   `--facecam-box x,y,w,h` (0..1) / SETTINGS forces `split_stack` with that box.
 3. **Director** (`director.py`): local Ollama picks the scenario + title + 4 hashtags (rule-based fallback when
-   offline); cuts, zooms, effects, takeovers, mutes, speed ramps and SFX are placed deterministically from word gaps
-   and loudness peaks. `edl.json` times are source seconds.
-   - `chat_roast`: calm setup -> record scratch + audio cut -> ramp zoom 1.0->1.45x + vine boom -> snap 1.65x +
-     reaction boost (contrast/saturation/sharpen) + trauma shake on the outburst.
-   - `unfiltered_chaos`: jump cuts on pauses > 0.25 s, facecam takeover + snap zoom on every vocal peak, trauma
-     shake + RGB split on screams, vine boom + bass boost + metal pipe.
-   - `horror_jumpscare`: vignette + 1.15x creep in the quiet -> 2-frame flash + shake + takeover on the scare, hard
-     cut 0.4 s after it.
-   - `confident_fail`: setup at 1.15x speed with green captions -> record scratch + audio cut at the fail ->
-     grayscale + slow zoom + sad violin over ~2 s of aftermath.
-   - `awkward_irl`: >= 3 s holds, slow drift zoom, blur_fill framing, vine boom or pop only.
+   offline); cuts, zooms, effects, takeovers, mutes, speed ramps and SFX are placed deterministically. Pacing: words + Silero
+   VAD speech (bundled with faster-whisper) + loud reactions are kept, every silence > 0.35 s is cut (0.25 s in
+   `unfiltered_chaos`), 0.1 s pad. `edl.json` times are source seconds (teaser effects: `"out": true` = output s).
+   Retention stack on every clip (`choreograph()`): snap punch-ins 1.35x on the climax / 1.3x on yells / 1.22x on
+   "!" / "?" lines, held to the next sentence, each with a -16 dB whoosh; slow 1.0 -> 1.12x push-ins wherever the
+   picture would sit still > 3 s; a 0.25 s +-8 px shake on yells (>= 85% of the peak and 2.5x the median); a -14 dB
+   thud on the climax; a 1.2-1.5 s cold open of a loud second-half climax on clips >= 16 s (1.25x, white flash +
+   whoosh on the hard cut into the setup; never for horror). Zooms grow about `framing.zoom_room()`'s anchor and stop
+   where a head (or the stream's own caption line) would leave the panel.
+   - `chat_roast`: record scratch (-14 dB) + audio cut before a real yell, reaction boost on it.
+   - `unfiltered_chaos`: jump cuts on pauses > 0.25 s, facecam takeover on every vocal peak, RGB split on screams.
+   - `horror_jumpscare`: vignette in the quiet -> 2-frame flash + takeover on the scare, hard cut 0.4 s after it.
+   - `confident_fail`: setup at 1.15x speed -> record scratch + audio cut at the fail -> grayscale aftermath.
+   - `awkward_irl`: blur_fill framing.
 4. **Renderer** (`renderer.py`), one ffmpeg pass:
    - Framing: `split_stack` (facecam 1080x690 on top, 4 px seam, gameplay 1080x1226) with full-screen facecam
-     takeovers; or `blur_fill` (sharp 16:9 over a quarter-res blurred fill).
-   - Effects: snap / ramp / creep / drift zooms (zoompan) and +-20 px damped trauma shake on the panels; reaction boost,
+     takeovers; `face_crop` (9:16 column, crop x follows the face track); or `blur_fill` (sharp 16:9 over a
+     quarter-res blurred fill).
+   - Effects: snap / ramp / creep / drift zooms (zoompan about the head-safe anchor, capped) and +-8 px damped trauma
+     shake on the panels (`face_crop` zooms too); reaction boost,
      RGB split, grayscale, flash, vignette on the frame.
-   - Kinetic `.ass` captions: 1-3 word bursts (<= 0.9 s) that pop in with a scale bounce; uppercase per-scenario
-     font (Impact / Arial Black / Trebuchet MS, Impact on screams; `.ttf` files in `assets/fonts/` named after their
-     family are loaded); neutral words white, the active word yellow (punchline) / green (hype) / red (scream) /
-     cyan (roast); 8 px outline, 4 px shadow, MarginV 540.
+   - One kinetic `.ass` caption track (none when the source has its own): 1-3 word lines (<= 1.3 s), uppercase heavy
+     font (Arial Black / Impact; `.ttf` files in `assets/fonts/` named after their family are loaded); the active word
+     pops 118% -> 100% in 70 ms and turns yellow (`&H0000FFFF`), cyan (`&H00FFFF00`) on hype / loud words; outline 4,
+     shadow 3, MarginV 660, side margins 140.
    - Audio: original with mutes + speed ramps (`atempo`), SFX via `adelay` (procedural vine_boom, metal_pipe,
-     bass_boost, record_scratch, sad_violin, whoosh, pop written to `assets/sfx/` on first run; your own
+     bass_boost, record_scratch, sad_violin, whoosh, pop, thud written to `assets/sfx/` on first run; your own
      `.mp3`/`.wav` with the same name always wins), music from `assets/music/` ducked under speech,
      `loudnorm=I=-14:TP=-1.5:LRA=11`.
    - Encoder: h264_nvenc / h264_vaapi when a probe encode works, else libx264 superfast crf 20 (NVENC: p3, cq 22). Always 30 fps. A 26 s short renders in ~25 s here.

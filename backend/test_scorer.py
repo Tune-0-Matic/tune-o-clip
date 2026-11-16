@@ -342,4 +342,24 @@ urllib.request.urlopen = offline
 assert scorer.resolve_model("qwen-x") == "qwen-x"  # offline: unchanged, the heuristic fallback applies
 urllib.request.urlopen = real_urlopen
 
+
+# approved clip -> title angles (42-52 asked, 38-56 kept), 5 hashtags, pinned line; junk or offline -> {} (nothing invented)
+real_ask = scorer._ask_json
+answers = []
+scorer._ask_json = lambda prompt, model, url, timeout: (answers.append(prompt), {
+    "title_angles": ["CaseOh found out what is inside the fridge at 3am", "short", "CaseOh found out what is inside the fridge at 3am",
+                     "Chat could not stop laughing at this CaseOh moment", "#tag in a title that is long enough to keep it ok ok",
+                     "Why would anyone hide THAT in the fridge, CaseOh?", 7],
+    "hashtags": ["caseoh", "#Fridge Moment", "#funny", "#shorts", "#twitch", "#extra"], "pinned_comment": "  What would YOU do?  "})[1]
+md = scorer.ollama_metadata({"transcript": "what is in the fridge bro", "judge_reason": "big reaction"}, "m", "caseoh_")
+assert md["title_angles"] == ["CaseOh found out what is inside the fridge at 3am", "Chat could not stop laughing at this CaseOh moment",
+                              "Why would anyone hide THAT in the fridge, CaseOh?"], md["title_angles"]  # short / dup / hashtag / non-str out
+assert md["hashtags"] == ["#caseoh", "#fridgemoment", "#funny", "#shorts", "#twitch"] and md["pinned_comment"] == "What would YOU do?", md
+assert '"streamer": "caseoh_"' in answers[0] and "42 to 52 characters" in answers[0]
+scorer._ask_json = lambda *a: ["not", "a", "dict"]
+assert scorer.ollama_metadata({"transcript": "x"}, "m") == {}
+scorer._ask_json = lambda *a: (_ for _ in ()).throw(TimeoutError("slow"))
+assert scorer.ollama_metadata({"transcript": "x"}, "m") == {}, "offline: no card, the run goes on"
+scorer._ask_json = real_ask
+
 print("scorer ok")

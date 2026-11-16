@@ -10,7 +10,7 @@ const LED_COLORS := {"IDLE": Color("5c636a"), "RUNNING": Color("3ddc84"), "STUCK
 		"ERROR": Color("ef4444"), "DONE": Color("38bdf8")}
 const STUCK_MS := 90_000  # no stdout line for this long (outside a known sleep) = probably hung
 
-const SOURCE_MODES := ["Single YouTube URL", "Batch URLs", "Twitch Streamers"]
+const SOURCE_MODES := ["Single YouTube URL", "Batch URLs", "Twitch Streamers", "Twitch VOD Chat Spikes"]
 const OLLAMA_MODEL := "richardyoung/qwen2.5-3b-instruct-abliterated"
 const DEFAULT_SETTINGS := {
 	"clips": 4, "min_length": 15, "max_length": 55, "min_score": 6.0, "cleanup_source": false,
@@ -98,6 +98,7 @@ var _ollama_http: HTTPRequest
 
 
 func _ready() -> void:
+	save_runpod_choice = _spawn_set_env
 	theme = _make_theme()
 	var bg := Panel.new()
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -150,12 +151,47 @@ func _ready() -> void:
 	drawers.allow_unpress = true
 	settings_button.button_group = drawers
 	auto_post_button.button_group = drawers
+	runpod_drawer_button = Button.new()
+	runpod_drawer_button.text = "RUNPOD"
+	runpod_drawer_button.toggle_mode = true
+	runpod_drawer_button.tooltip_text = "GPU catalog (price, VRAM, availability), balance, cloud type and limits"
+	runpod_drawer_button.button_group = drawers
+	runpod_drawer_button.toggled.connect(func(on: bool) -> void:
+		runpod_panel.visible = on
+		if on and _gpu_catalog.is_empty():
+			cloud_command("gpus"))
+	bar.add_child(runpod_drawer_button)
+	cloud_button = Button.new()  # RunPod cloud GPU: ON creates + bootstraps a Pod, OFF terminates it ($0.00 after)
+	cloud_button.toggle_mode = true
+	cloud_button.text = "RUNPOD GPU: OFF"
+	cloud_button.tooltip_text = ("Runs go to a RunPod cloud GPU (Whisper large-v3-turbo + qwen2.5:14b + NVENC).\n"
+			+ "OFF terminates the Pod: no compute or storage billed after. Guards: $%.2f per session, %d min idle."
+			% [cloud_max_usd, 10])
+	cloud_button.toggled.connect(_on_cloud_toggled)
+	bar.add_child(cloud_button)
+	cloud_label = _label("Local 1050 Ti")
+	cloud_label.add_theme_color_override("font_color", DIM)
+	bar.add_child(cloud_label)
+	var key_button := Button.new()
+	key_button.text = "RUNPOD KEY"
+	key_button.tooltip_text = "Save your RunPod API key to .env (never to settings.json)"
+	key_button.pressed.connect(_ask_runpod_key)
+	bar.add_child(key_button)
 	ollama_badge = _label("OLLAMA: ...")
 	ollama_badge.add_theme_color_override("font_color", DIM)
 	ollama_badge.tooltip_text = "Local Ollama comedy judge (polled every 5 s)"
 	ollama_badge.mouse_filter = Control.MOUSE_FILTER_PASS
 	bar.add_child(ollama_badge)
 	bar.add_child(_make_led())
+
+	cloud_banner = Button.new()  # red: a tune-o-clip Pod is billing that this panel didn't start (crash / old session)
+	cloud_banner.visible = false
+	cloud_banner.add_theme_color_override("font_color", Color.WHITE)
+	cloud_banner.add_theme_stylebox_override("normal", _box(BAD.darkened(0.3), BAD, 2))
+	cloud_banner.add_theme_stylebox_override("hover", _box(BAD.darkened(0.1), BAD, 2))
+	cloud_banner.pressed.connect(func() -> void: cloud_command("off"))
+	root.add_child(cloud_banner)
+	runpod_state_path = _project_root().path_join("workspace/runpod_state.json")
 
 	twitch_channels_path = _project_root().path_join("workspace/twitch_channels.txt")
 	load_settings()
@@ -166,6 +202,9 @@ func _ready() -> void:
 	auto_post_panel = _make_settings(AUTO_POST_UI, _make_post_actions())
 	auto_post_panel.visible = false
 	root.add_child(auto_post_panel)
+	runpod_panel = _make_runpod_drawer()
+	runpod_panel.visible = false
+	root.add_child(runpod_panel)
 
 	# batch mode: one link per line -> backend/queue_worker.py --add-file ... --drain (dedup, cooldowns, cleanup)
 	batch_box = HBoxContainer.new()
@@ -236,11 +275,17 @@ func _ready() -> void:
 	_poll_timer.timeout.connect(func() -> void:
 		poll_ollama()
 		refresh_systems()  # .venv / ffmpeg / .env can be fixed while the panel is open
+		cloud_tick(Time.get_ticks_msec())
 		if auto_post_due(Time.get_unix_time_from_system()):
 			_auto_post_try = Time.get_unix_time_from_system()
 			_start(publish_args(false)))
 	add_child(_poll_timer)
 	poll_ollama()
+	get_tree().set_auto_accept_quit(false)  # closing asks about a running RunPod Pod first (_notification)
+	_make_cloud_dialogs()
+	refresh_cloud_ui()
+	if DisplayServer.get_name() != "headless":
+		cloud_command("status")  # orphan check: a Pod still billing from a crash or an earlier session -> red banner
 	boot()
 	start_telemetry()
 	add_child(_make_preview())  # last child: the overlay draws over everything
@@ -358,11 +403,13 @@ func poll_ollama() -> void:
 
 
 func set_ollama_status(online: bool) -> void:
-	if not online and ollama_badge.text.ends_with("ONLINE"):  # only the drop, not every 5 s poll
+	# RunPod on (or starting / stopping): runs judge with the Pod's own Ollama, so a local one being off is no problem
+	var pod := cloud_ready() or _cloud_busy
+	if not online and not pod and ollama_badge.text.ends_with("ONLINE"):  # only the drop, not every 5 s poll
 		show_banner("Ollama went offline (http://127.0.0.1:11434 not answering)")
-	ollama_badge.text = "OLLAMA: ONLINE" if online else "OLLAMA: OFFLINE"
-	ollama_badge.add_theme_color_override("font_color", GOOD if online else AMBER)
-	_systems.ollama = online
+	ollama_badge.text = "OLLAMA: ONLINE" if online else ("OLLAMA: ON POD" if pod else "OLLAMA: OFFLINE")
+	ollama_badge.add_theme_color_override("font_color", GOOD if online or pod else AMBER)
+	_systems.ollama = online or pod
 	update_start_button()
 
 
@@ -507,13 +554,14 @@ func start() -> void:
 	if not missing.is_empty():  # Enter in the URL box bypasses the disabled button
 		_log("START: waiting for %s to come online." % ", ".join(missing), AMBER)
 		return
-	[_run, run_batch, poll_twitch][mode_opt.selected].call()
+	[_run, run_batch, poll_twitch, run_spikes][mode_opt.selected].call()
 
 
 ## Shows the input the source mode needs: URL field, batch paste box, or a hint (Twitch reads SETTINGS).
 func set_mode(i: int) -> void:
 	mode_opt.select(i)
-	url_edit.visible = i == 0
+	url_edit.visible = i == 0 or i == 3  # spikes: a Twitch VOD or YouTube link
+	url_edit.placeholder_text = "https://www.twitch.tv/videos/... (or a YouTube link)" if i == 3 else "https://www.youtube.com/watch?v=..."
 	batch_box.visible = i == 1
 	twitch_hint.visible = i == 2
 	_reset_led()
@@ -536,6 +584,29 @@ func run_batch() -> void:
 	elif not _busy("START"):
 		_twitch_run = false
 		_start(build_batch_args(batch_edit.text))
+
+
+## Twitch VOD Chat Spikes: backend/spike_clipper.py scores chat (or a YouTube heatmap) before any download and
+## processes only the best 45-60 s slices. A chat log saved as workspace/chat/<vod id>.json is passed along.
+func run_spikes() -> void:
+	var url := url_edit.text.strip_edges()
+	if url.is_empty():
+		_log("START: paste a Twitch VOD (twitch.tv/videos/...) or YouTube link first.", BAD)
+	elif not _busy("START"):
+		_twitch_run = false
+		_start(build_spike_args(url))
+
+
+func build_spike_args(url: String) -> PackedStringArray:
+	var args := PackedStringArray(["-u", _project_root().path_join("backend/spike_clipper.py"), url])
+	var vod := RegEx.create_from_string("twitch\\.tv/videos/(\\d+)").search(url)
+	if vod != null:
+		var chat := _project_root().path_join("workspace/chat/%s.json" % vod.get_string(1))
+		if FileAccess.file_exists(chat):
+			args.append_array(PackedStringArray(["--chat", chat]))  # an absolute repo path: RunPod uploads it too
+	args.append_array(_clipper_options())
+	args.append_array(_queue_options())  # --auto-edit
+	return args
 
 
 func poll_twitch() -> void:
@@ -564,6 +635,7 @@ func _set_busy(on: bool) -> void:
 
 
 func _start(args: PackedStringArray) -> void:
+	args = cloud_args(args)  # RunPod ON + ready: the same run happens on the Pod, its shorts are pulled back here
 	# blocking pipes: non-blocking ones read EOF instantly. Linux: setsid gives the run its own session (same pid,
 	# setsid execs in place), so closing the panel can stop its clipper / ffmpeg / yt-dlp children too.
 	var proc := OS.execute_with_pipe("setsid", PackedStringArray([_python()]) + args) if OS.get_name() == "Linux" \
@@ -1447,8 +1519,8 @@ func track_task(ev: Dictionary, now_ms: int = -1) -> void:
 			elif msg.begins_with("Auto-editing"):
 				title = "Auto-edit"
 		"log":
-			if msg.begins_with("Facecam:"):
-				_layout_tag = " [split_stack]" if msg.contains("detected") else " [blur_fill]"
+			if msg.begins_with("Framing: "):
+				_layout_tag = " [%s]" % msg.trim_prefix("Framing: ").get_slice(" ", 0)
 			elif msg.begins_with("Encoder: "):
 				_encoder_name = msg.trim_prefix("Encoder: ")
 			elif msg.contains("loaded on cuda"):
@@ -1564,7 +1636,11 @@ func _telemetry_loop() -> void:
 	var prev_cpu: Array = []
 	var i := 0
 	while _telemetry_on:
-		apply_telemetry.call_deferred(sample_system(prev_cpu, i % 5 == 0))
+		if cloud_ready():  # RunPod ON + ready: the Pod's own hardware, over SSH every 10 s
+			if i % 5 == 0:
+				apply_telemetry.call_deferred({"cloud": sample_pod()})
+		else:
+			apply_telemetry.call_deferred(sample_system(prev_cpu, i % 5 == 0))
 		i += 1
 		for k in 20:
 			if not _telemetry_on:
@@ -1598,6 +1674,22 @@ func sample_system(prev_cpu: Array, with_queue: bool) -> Dictionary:
 	return t
 
 
+## One Pod sample (runpod_manager.py stats). Telemetry thread. SSH down: the GPU type + price from the state file.
+func sample_pod() -> Dictionary:
+	var out := []
+	if OS.execute(_python(), PackedStringArray(["-u", _runpod_script(), "stats"]), out) == 0 and not out.is_empty():
+		for line: String in str(out[0]).split("\n"):
+			var j := JSON.new()
+			if line.begins_with("{") and j.parse(line) == OK and j.data is Dictionary and (j.data as Dictionary).has("gpu"):
+				return j.data
+	var st := load_cloud_state()
+	return {"gpu_type": st.get("gpu", "RunPod GPU"), "cost_per_hr": st.get("cost_per_hr"), "spec_only": true}
+
+
+static func short_gpu(name: String) -> String:
+	return name.replace("NVIDIA ", "").replace("GeForce ", "").replace(" Generation", "")
+
+
 static func parse_nvidia_smi(line: String) -> Dictionary:
 	var p := line.strip_edges().split("\n")[0].split(",")
 	if p.size() < 4:
@@ -1629,6 +1721,27 @@ static func cpu_from_proc_stat(line: String, prev_cpu: Array) -> float:
 
 
 func apply_telemetry(t: Dictionary) -> void:
+	if t.has("cloud"):  # the RunPod Pod's hardware instead of this PC's
+		_cloud_hw = t.cloud if not (t.cloud as Dictionary).is_empty() else {"spec_only": true}
+		var c: Dictionary = _cloud_hw
+		var name := short_gpu(str(c.get("gpu_type", (c.get("gpu", {}) as Dictionary).get("name", "RunPod GPU")))) + " (Cloud)"
+		var g: Dictionary = c.get("gpu", {})
+		if not g.is_empty():
+			set_gauge("GPU", g.util, "%s %d%%   %d°C" % [name, int(g.util), int(g.temp)])
+			set_gauge("VRAM", 100.0 * g.used / maxf(1.0, g.total), "VRAM %d / %d MB" % [int(g.used), int(g.total)])
+		else:
+			(gauges["GPU"].label as Label).text = name + " (stats unavailable)"
+			(gauges["VRAM"].label as Label).text = "VRAM: --"
+		if c.get("cpu") != null:
+			set_gauge("CPU", float(c.cpu), "CPU %d%%   (%s vCPU)" % [int(c.cpu), str(c.get("vcpu", "?"))])
+		if c.get("ram_total") != null:
+			set_gauge("RAM", 100.0 * float(c.ram_used) / maxf(0.1, float(c.ram_total)), "RAM %.1f / %.1f GB" % [float(c.ram_used), float(c.ram_total)])
+		var df: float = float(c.get("disk_free", -1.0)) if c.get("disk_free") != null else -1.0
+		disk_label.text = "Disk free: %.1f GB (Pod)" % df if df >= 0 else "Disk free: -- (Pod)"
+		disk_label.add_theme_color_override("font_color", Color("5ad06a") if df > 5 or df < 0 else Color("e0a030"))
+		refresh_stats()
+		return
+	_cloud_hw = {}
 	if t.has("gpu") and not (t.gpu as Dictionary).is_empty():
 		var g: Dictionary = t.gpu
 		_gpu_kind = "NVIDIA"
@@ -1666,8 +1779,15 @@ func refresh_stats() -> void:
 	var shorts := 0
 	if DirAccess.dir_exists_absolute(_ready_dir()):
 		shorts = Array(DirAccess.get_files_at(_ready_dir())).filter(func(f: String) -> bool: return f.ends_with("_short.mp4")).size()
-	stats_label.text = "Encoder: %s\nAI: Whisper %s + Ollama %s ($0.00)\nQueue: %d pending · %d done · %d failed\nShorts ready: %d\nTwitch token: %s" % [
-			enc, whisper, ollama, int(_queue_counts.pending), int(_queue_counts.done), int(_queue_counts.failed), shorts, twitch_token_status()]
+	var ai := "Whisper %s + Ollama %s ($0.00)" % [whisper, ollama]
+	if not _cloud_hw.is_empty():  # runs happen on the Pod: its encoder and models (scorer.CLOUD)
+		var rate: Variant = _cloud_hw.get("cost_per_hr", load_cloud_state().get("cost_per_hr"))
+		var pod_enc := str(_cloud_hw.get("encoder", "h264_nvenc"))  # measured on the Pod by the bootstrap
+		enc = ("NVENC %s (H.264 -cq 19)" % short_gpu(str(_cloud_hw.get("gpu_type", "RunPod")))) if pod_enc == "h264_nvenc" \
+				else "CPU libx264 on the Pod (NVENC blocked on this host)"
+		ai = "Whisper large-v3-turbo + Ollama qwen2.5:14b-instruct (%s)" % ("$%.2f/hr" % float(rate) if rate != null else "RunPod")
+	stats_label.text = "Encoder: %s\nAI: %s\nQueue: %d pending · %d done · %d failed\nShorts ready: %d\nTwitch token: %s" % [
+			enc, ai, int(_queue_counts.pending), int(_queue_counts.done), int(_queue_counts.failed), shorts, twitch_token_status()]
 
 
 func twitch_token_status(now_unix: float = -1.0) -> String:
@@ -1833,9 +1953,13 @@ func _clip_row(e: Dictionary) -> Control:
 		box.add_child(why)
 	var short_info := _short_summary(e)
 	if not short_info.is_empty():
-		var edited := _label(short_info)
+		var card := _post_card(e)
+		var edited := _label(short_info + ("  ·  hover: title angles + pinned comment" if not card.is_empty() else ""))
 		edited.add_theme_color_override("font_color", GOOD)
 		edited.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		if not card.is_empty():
+			edited.tooltip_text = card
+			edited.mouse_filter = Control.MOUSE_FILTER_PASS  # a Label ignores the mouse by default: no tooltip without this
 		box.add_child(edited)
 	var buttons := HFlowContainer.new()  # wraps onto a 2nd line when the row is narrow (up to 6 buttons)
 	box.add_child(buttons)
@@ -1901,6 +2025,12 @@ func _short_summary(e: Dictionary) -> String:
 	var p: Dictionary = post
 	return what + ": %s  |  %.1fs  %s" % [str(p.get("social_title", p.get("title", ""))), float(p.get("duration", 0)),
 			str(p.get("archetype", "")).replace("_", " ")]
+
+
+## The short's _post.txt card (14B title angles, 5 hashtags, pinned comment; editor/pipeline.card_text), "" if none.
+func _post_card(e: Dictionary) -> String:
+	var txt := short_path(e).trim_suffix("_short.mp4") + "_post.txt"
+	return FileAccess.get_file_as_string(txt).strip_edges() if FileAccess.file_exists(txt) else ""
 
 
 ## The clip's short: in ready_to_post/, or in posted/ once the publisher has posted it (then it is still "made").
@@ -2350,6 +2480,377 @@ func _input(ev: InputEvent) -> void:
 		_:
 			return
 	get_viewport().set_input_as_handled()
+
+
+# --- RunPod cloud GPU (backend/runpod_manager.py): one Pod, terminated when OFF, spend + idle guards ---------------
+
+const RATE_FALLBACK := 0.70  # $/hr the spend meter assumes when RunPod gave no price (as runpod_manager.RATE_FALLBACK)
+const CLOUD_STATUS_MS := 60_000  # status (and its idle / spend guards) every minute while a Pod is on
+var cloud_button: Button
+var cloud_label: Label
+var cloud_banner: Button
+var cloud_max_usd := 1.50  # RUNPOD_MAX_SESSION_USD (the real value arrives with each status event)
+var runpod_state_path := ""
+var _cloud_thread: Thread
+var _cloud_busy := false
+var _cloud_status_at := 0
+var _quit_dialog: ConfirmationDialog
+var _key_dialog: AcceptDialog
+var _key_edit: LineEdit
+
+
+func _runpod_script() -> String:
+	return _project_root().path_join("backend/runpod_manager.py")
+
+
+# RUNPOD drawer: the live GPU catalog (runpod_manager.py gpus), balance, limits, cloud type; a row click selects the GPU
+const CLOUD_TYPES := ["ALL", "SECURE", "COMMUNITY"]
+const BATCH_MIN := 3.0  # "~$ per 3-min batch" column
+var runpod_drawer_button: Button
+var runpod_panel: PanelContainer
+var gpu_rows: VBoxContainer
+var runpod_info: Label
+var cloud_type_opt: OptionButton
+var _gpu_catalog: Array = []
+var _gpu_selected := "NVIDIA RTX 4000 Ada Generation"
+var _cloud_type := "ALL"
+var _balance: Variant = null
+var _idle_min := 10.0
+var _min_vram_gb := 16.0  # runpod_manager.MIN_VRAM_GB: the 14B model + Whisper large need it
+var _cloud_hw := {}  # the Pod's last hardware sample while RunPod is ready ({} = this PC)
+var _gpu_picked := false  # a row clicked this session: a catalog refresh still carrying .env's old choice can't undo it
+var _cloud_picked := false
+var save_runpod_choice: Callable  # (gpu, cloud) -> .env for the next app start; tests swap it out (_ready sets the real one)
+
+
+func _make_runpod_drawer() -> PanelContainer:
+	var panel := PanelContainer.new()
+	var col := VBoxContainer.new()
+	panel.add_child(col)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 10)
+	col.add_child(head)
+	runpod_info = _label("Balance: …")
+	runpod_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(runpod_info)
+	head.add_child(_label("Cloud:"))
+	cloud_type_opt = OptionButton.new()
+	for c: String in CLOUD_TYPES:
+		cloud_type_opt.add_item(c)
+	cloud_type_opt.tooltip_text = "ALL tries Secure first, then Community (both with a public IP for SSH)"
+	cloud_type_opt.item_selected.connect(func(i: int) -> void:
+		_cloud_type = CLOUD_TYPES[i]
+		_cloud_picked = true
+		save_runpod_choice.call(_gpu_selected if _gpu_picked or not _gpu_catalog.is_empty() else "", _cloud_type)
+		render_gpu_rows())
+	head.add_child(cloud_type_opt)
+	var refresh := Button.new()
+	refresh.text = "Refresh GPUs"
+	refresh.pressed.connect(func() -> void: cloud_command("gpus"))
+	head.add_child(refresh)
+	var diag := Button.new()
+	diag.text = "Test Deploy (no cost)"
+	diag.tooltip_text = "Checks the key, balance, the selected GPU's price + stock and create permission. Creates nothing."
+	diag.pressed.connect(func() -> void: cloud_command("diagnose", on_args()))
+	head.add_child(diag)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size.y = 210
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	col.add_child(scroll)
+	gpu_rows = VBoxContainer.new()
+	gpu_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(gpu_rows)
+	gpu_rows.add_child(_label("Open the drawer or press Refresh GPUs (needs RUNPOD KEY)."))
+	return panel
+
+
+## Price / availability of one catalog entry in the chosen cloud type: [$/hr or -1, best availability, cloud].
+func gpu_offer(g: Dictionary) -> Array:
+	var best := [-1.0, "NONE", ""]
+	for c: String in (["SECURE", "COMMUNITY"] if _cloud_type == "ALL" else [_cloud_type]):
+		var avail := str((g.get("avail", {}) as Dictionary).get(c, "NONE"))
+		var price: Variant = (g.get("price", {}) as Dictionary).get(c)
+		if avail != "NONE" and price != null and (best[0] < 0 or float(price) < best[0]):
+			best = [float(price), avail, c]
+	return best
+
+
+## One full-width flat Button per GPU (no child controls, so a click anywhere on the row is the Button's own).
+## Rebuilt only when the catalog or cloud type changes; a click just re-labels the rows (_show_gpu_selection).
+func render_gpu_rows() -> void:
+	for n in gpu_rows.get_children():
+		gpu_rows.remove_child(n)  # out of the list now: a queue_free'd row alone would still show for a frame
+		n.queue_free()
+	for g: Dictionary in _gpu_catalog:
+		var offer := gpu_offer(g)
+		var too_small: bool = g.get("memory") != null and float(g.memory) < _min_vram_gb
+		var row := Button.new()
+		row.flat = true
+		row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.set_meta("gpu", g)
+		row.add_theme_color_override("font_color", GOOD if offer[0] >= 0.0 and not too_small else DIM)
+		# out of capacity stays clickable: ON tries the pick first anyway, and live stock flips faster than the catalog
+		row.disabled = too_small
+		row.tooltip_text = "Secure $%s %s · Community $%s %s" % [(g.price as Dictionary).get("SECURE"), (g.avail as Dictionary).get("SECURE"),
+				(g.price as Dictionary).get("COMMUNITY"), (g.avail as Dictionary).get("COMMUNITY")]
+		row.pressed.connect(select_gpu.bind(str(g.id)))
+		gpu_rows.add_child(row)
+	_show_gpu_selection()
+
+
+## The info line's "Selected:" and every row's ▶ / text, from _gpu_selected (no nodes created or freed).
+func _show_gpu_selection() -> void:
+	var bal := "$%.2f" % float(_balance) if _balance != null else "?"
+	runpod_info.text = "Balance: %s  ·  Session cap: $%.2f  ·  Idle auto-terminate: %d min  ·  Selected: %s" % [
+			bal, cloud_max_usd, int(_idle_min), short_gpu(_gpu_selected)]
+	for row in gpu_rows.get_children():
+		if row is Button and row.has_meta("gpu"):
+			(row as Button).text = _gpu_row_text(row.get_meta("gpu"))
+
+
+func _gpu_row_text(g: Dictionary) -> String:
+	var offer := gpu_offer(g)
+	var too_small: bool = g.get("memory") != null and float(g.memory) < _min_vram_gb
+	var ok: bool = offer[0] >= 0.0 and not too_small
+	var c: String = offer[2] if ok else "SECURE"
+	var vcpu: Variant = (g.get("vcpu", {}) as Dictionary).get(c)
+	var ram: Variant = (g.get("ram", {}) as Dictionary).get(c)
+	return "%s %-24s %3s GB VRAM  %-18s  %s  %s" % [
+			"▶" if g.id == _gpu_selected else "  ", str(g.get("name", g.id)).left(24),
+			str(int(g.memory)) if g.get("memory") != null else "?",  # JSON numbers arrive as floats
+			("%d vCPU · %d GB RAM" % [int(vcpu), int(ram) if ram != null else 0]) if vcpu != null else "",
+			("$%.2f/hr %s · ~$%.3f per 3-min batch" % [offer[0], c.to_lower(), offer[0] * BATCH_MIN / 60.0]) if ok else "",
+			("AVAILABLE (%s)" % offer[1]) if ok else ("TOO SMALL (needs %d GB VRAM)" % int(_min_vram_gb) if too_small else "OUT OF CAPACITY")]
+
+
+func select_gpu(id: String) -> void:
+	_gpu_selected = id  # what the next ON / Test Deploy passes as --gpu (on_args): no file round trip, no race
+	_gpu_picked = true
+	save_runpod_choice.call(_gpu_selected, _cloud_type)
+	_log("[RUNPOD] GPU set to %s (saved to .env): used on the next RUNPOD GPU: ON." % id, DIM)
+	_show_gpu_selection()
+
+
+## .env keeps the drawer's choice for the next app start: ONE process writes both keys (atomically, see
+## runpod_manager.set_env_key), so a GPU pick and a cloud-type change can't overwrite each other. "" = leave it.
+func _spawn_set_env(gpu: String, cloud: String) -> void:
+	var argv := PackedStringArray(["-u", _runpod_script(), "set-env", "RUNPOD_CLOUD_TYPE", cloud])
+	if not gpu.is_empty():
+		argv.append_array(PackedStringArray(["RUNPOD_GPU_ID", gpu]))
+	OS.create_process(_python(), argv)
+
+
+func apply_gpu_catalog(ev: Dictionary) -> void:
+	_gpu_catalog = ev.get("gpus", [])
+	_balance = ev.get("balance")
+	if not _gpu_picked:  # this refresh may have read .env before the click's save landed
+		_gpu_selected = str(ev.get("selected", _gpu_selected))
+	if not _cloud_picked:
+		_cloud_type = str(ev.get("cloud_type", _cloud_type))
+	cloud_max_usd = float(ev.get("max_usd", cloud_max_usd))
+	_idle_min = float(ev.get("idle_min", _idle_min))
+	_min_vram_gb = float(ev.get("min_vram_gb", _min_vram_gb))
+	cloud_type_opt.select(maxi(0, CLOUD_TYPES.find(_cloud_type)))
+	render_gpu_rows()
+
+
+func load_cloud_state() -> Dictionary:
+	var j := JSON.new()
+	if runpod_state_path.is_empty() or j.parse(FileAccess.get_file_as_string(runpod_state_path)) != OK or not j.data is Dictionary:
+		return {}
+	return j.data
+
+
+func cloud_ready() -> bool:
+	return bool(load_cloud_state().get("ready", false))
+
+
+## A run while the Pod is ready: runpod_manager.py run -- <script + args> (it streams the same JSON lines back).
+func cloud_args(args: PackedStringArray) -> PackedStringArray:
+	if not cloud_ready() or args.size() < 2:
+		return args
+	var out := PackedStringArray(["-u", _runpod_script(), "run", "--"])
+	out.append_array(args.slice(1))  # args[0] is python's -u
+	return out
+
+
+## "Local 1050 Ti" or "RunPod RTX 4000 Ada • $0.28/hr • $0.12 / $1.50" from runpod_state.json (now = unix seconds).
+static func cloud_meter_text(state: Dictionary, now: float, max_usd: float) -> String:
+	if not state.has("pod_id"):
+		return "Local 1050 Ti"
+	var rate := float(state.get("cost_per_hr")) if state.get("cost_per_hr") != null else 0.0
+	var spent := maxf(0.0, now - float(state.get("created", now))) * (rate if rate > 0.0 else RATE_FALLBACK) / 3600.0
+	var gpu := str(state.get("gpu", "RunPod GPU")).replace("NVIDIA ", "").replace("GeForce ", "").replace(" Generation", "")
+	return "RunPod %s • $%.2f/hr • $%.2f / $%.2f%s" % [gpu, rate, spent, max_usd, "" if state.get("ready") else " • starting"]
+
+
+func refresh_cloud_ui() -> void:
+	var state := load_cloud_state()
+	var on := state.has("pod_id")
+	cloud_button.set_pressed_no_signal(on)
+	cloud_button.text = "RUNPOD GPU: " + ("ON" if on else "OFF")
+	if not _cloud_busy:
+		cloud_label.text = cloud_meter_text(state, Time.get_unix_time_from_system(), cloud_max_usd)
+	cloud_label.add_theme_color_override("font_color", GOOD if state.get("ready") else (AMBER if on else DIM))
+
+
+## Every poll (5 s): the meter; every minute while a Pod is on: status (terminates it past the idle / spend limits).
+func cloud_tick(now_ms: int) -> void:
+	refresh_cloud_ui()
+	if load_cloud_state().has("pod_id") and not _cloud_busy and now_ms - _cloud_status_at >= CLOUD_STATUS_MS:
+		_cloud_status_at = now_ms
+		cloud_command("status")
+
+
+func _on_cloud_toggled(on: bool) -> void:
+	if _cloud_busy:
+		cloud_button.set_pressed_no_signal(not on)
+		_log("[RUNPOD] Still busy with the last ON / OFF: wait for it.", AMBER)
+		return
+	cloud_command("on", on_args()) if on else cloud_command("off")
+
+
+## The drawer's GPU + cloud type for `on` / `diagnose`, passed straight on the command line: the drawer's .env write
+## runs in its own process and ON must not race it. Nothing until the drawer has loaded (then .env's choice applies).
+func on_args() -> PackedStringArray:
+	if _gpu_catalog.is_empty():
+		return PackedStringArray()
+	return PackedStringArray(["--gpu", _gpu_selected, "--cloud", _cloud_type])
+
+
+## runpod_manager.py <mode> on a thread; its JSON lines update the label / banner / log as they come.
+func cloud_command(mode: String, extra: PackedStringArray = PackedStringArray()) -> void:
+	if _cloud_busy:
+		return
+	var argv := PackedStringArray(["-u", _runpod_script(), mode])
+	argv.append_array(extra)
+	var proc := OS.execute_with_pipe(_python(), argv)
+	if proc.is_empty():
+		_log("[RUNPOD] Could not start Python (%s)." % _python(), BAD)
+		return
+	_cloud_busy = true
+	if mode == "on":
+		cloud_label.text = "Deploying Pod..."
+	elif mode == "off":
+		cloud_label.text = "Terminating Pod..."
+	_cloud_thread = Thread.new()
+	_cloud_thread.start(func() -> void:
+		var pipe: FileAccess = proc.stdio
+		while true:
+			var line := pipe.get_line()
+			if pipe.get_error() != OK:
+				break
+			_on_cloud_line.call_deferred(line)
+		_cloud_done.call_deferred())
+
+
+func _on_cloud_line(line: String) -> void:
+	var j := JSON.new()
+	if j.parse(line) != OK or not j.data is Dictionary:
+		return
+	var ev: Dictionary = j.data
+	var msg := str(ev.get("msg", ""))
+	if ev.get("event") == "runpod_gpus":
+		apply_gpu_catalog(ev)
+		return
+	if ev.get("event") == "error":
+		_log(msg, BAD)
+		show_banner(msg)
+		return
+	if ev.get("event") != "runpod":
+		return
+	if ev.get("max_usd") != null:
+		cloud_max_usd = float(ev.max_usd)
+	match str(ev.get("stage", "")):
+		"orphan":
+			cloud_banner.text = msg
+			cloud_banner.visible = true
+		"off":
+			cloud_banner.visible = false
+			_cloud_hw = {}  # the sidebar goes back to this PC (gauges refresh on the next 2 s sample)
+			refresh_stats()
+		"key", "env":
+			pass
+		"diag":  # Test Deploy (no cost): console only, the status label stays as it is
+			_log("[RUNPOD TEST] " + msg, GOOD if msg.contains(": OK") else DIM)
+			return
+		_:
+			cloud_label.text = msg if ev.get("stage") != "ready" else cloud_meter_text(load_cloud_state(), Time.get_unix_time_from_system(), cloud_max_usd)
+	if (ev.get("stage") != "ready" or msg != "Ready") and not msg.begins_with("Local GPU"):  # no RunPod in use: stay quiet
+		_log("[RUNPOD] " + msg, DIM if ev.get("stage") not in ["off", "orphan"] else AMBER)
+
+
+func _cloud_done() -> void:
+	if _cloud_thread != null:
+		_cloud_thread.wait_to_finish()
+		_cloud_thread = null
+	_cloud_busy = false
+	refresh_cloud_ui()
+
+
+func _make_cloud_dialogs() -> void:
+	_quit_dialog = ConfirmationDialog.new()
+	_quit_dialog.title = "RunPod Pod still running"
+	_quit_dialog.ok_button_text = "Terminate Pod & Quit"
+	_quit_dialog.add_button("Keep Pod Running & Quit", true, "keep")
+	_quit_dialog.confirmed.connect(_terminate_and_quit)
+	_quit_dialog.custom_action.connect(func(_a: StringName) -> void:
+		_log("[RUNPOD] Pod kept running: its own watchdog ends it after the idle / spend limit.", AMBER)
+		get_tree().quit())
+	add_child(_quit_dialog)
+	_key_dialog = AcceptDialog.new()
+	_key_dialog.title = "RunPod API key"
+	_key_dialog.ok_button_text = "Save to .env"
+	_key_edit = LineEdit.new()
+	_key_edit.secret = true
+	_key_edit.placeholder_text = "rpa_... (RunPod > Settings > API Keys)"
+	_key_edit.custom_minimum_size.x = 420
+	_key_dialog.add_child(_key_edit)
+	_key_dialog.confirmed.connect(_save_runpod_key)
+	add_child(_key_dialog)
+
+
+func _ask_runpod_key() -> void:
+	_key_edit.text = ""
+	_key_dialog.popup_centered()
+
+
+## The key goes to runpod_manager.py set-key over stdin: never on a command line, never in settings.json.
+func _save_runpod_key() -> void:
+	var key := _key_edit.text.strip_edges()
+	_key_edit.text = ""
+	if key.is_empty():
+		return
+	var proc := OS.execute_with_pipe(_python(), PackedStringArray(["-u", _runpod_script(), "set-key"]))
+	if proc.is_empty():
+		_log("[RUNPOD] Could not start Python to save the key.", BAD)
+		return
+	(proc.stdio as FileAccess).store_line(key)
+	(proc.stdio as FileAccess).flush()
+	_log("[RUNPOD] API key saved to .env.", GOOD)
+
+
+func _notification(what: int) -> void:
+	if what != NOTIFICATION_WM_CLOSE_REQUEST:
+		return
+	var state := load_cloud_state()
+	if not state.has("pod_id") and not cloud_banner.visible:
+		get_tree().quit()
+		return
+	_quit_dialog.dialog_text = ("A RunPod Pod is still running (%s).\nClosing terminates it so nothing more is billed ($0.00/hr)."
+			% (cloud_meter_text(state, Time.get_unix_time_from_system(), cloud_max_usd) if state.has("pod_id") else cloud_banner.text))
+	_quit_dialog.popup_centered()
+
+
+func _terminate_and_quit() -> void:
+	var out := []
+	var code := OS.execute(_python(), PackedStringArray(["-u", _runpod_script(), "off"]), out, true)
+	if code != 0:  # stay open: the user must know the Pod may still be billing
+		var said := "".join(PackedStringArray(out)).strip_edges()
+		show_banner("[RUNPOD] Could not terminate the Pod: %s. Try RUNPOD GPU: OFF again, or terminate it in the RunPod console." % said.right(300))
+		return
+	get_tree().quit()
 
 
 # --- helpers ------------------------------------------------------------------------------------

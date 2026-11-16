@@ -1,0 +1,26 @@
+# Tune-O-Clip RunPod image: everything runpod_manager's bootstrap would install, baked in, so a Pod is Ready in seconds
+# once its host has the image. Build context = backend/ (scripts/build_runpod_image.*): only requirements.txt goes in.
+# No code, keys or cookies inside (the repo is synced over SSH at start), so the image is safe to publish.
+FROM runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
+
+ARG MODEL=qwen2.5:14b-instruct
+ARG WHISPER=large-v3-turbo
+ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore \
+    OLLAMA_MODELS=/opt/ollama/models HF_HOME=/opt/hf_cache
+
+# zstd: the Ollama installer needs it; pciutils: its GPU detection; openssh-server: RunPod's /start.sh runs sshd
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl zstd pciutils openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://ollama.com/install.sh | sh
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+
+# the models: ~1.6 GB Whisper into HF_HOME, ~9 GB Qwen into OLLAMA_MODELS (a throwaway server just for the pull)
+RUN python3 -c "from faster_whisper import download_model; download_model('${WHISPER}')"
+RUN (ollama serve >/tmp/ollama.log 2>&1 &) \
+    && for i in $(seq 60); do curl -fs localhost:11434/api/tags >/dev/null && break; sleep 1; done \
+    && ollama pull "${MODEL}" && pkill ollama \
+    && echo "${MODEL} ${WHISPER}" > /opt/toc_baked
+
+# no CMD / ENTRYPOINT: RunPod's /start.sh (from the base image) writes PUBLIC_KEY into authorized_keys and starts sshd
