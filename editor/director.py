@@ -2,8 +2,9 @@
 
 Local Ollama only picks the *creative* fields (title, hashtags, banner); the exact cut points, speed ramp and cold-open
 teaser are computed deterministically from Whisper word timings and the audio energy curve, so the EDL is always
-frame-sane and the Ollama-offline fallback is the same code path. No zooms / effect filters / SFX: the framing stays
-static and pycaps (editor/captions.py) owns the caption animation and sound cues.
+frame-sane and the Ollama-offline fallback is the same code path. Retention effects (retention_fx): facecam snap
+zooms + whoosh, yell shake + thud, the punchline's pitch drop; zooms / shake only on split_stack's webcam panel
+(the gameplay never moves). pycaps (editor/captions.py) owns the caption animation.
 
 All times in the EDL are SOURCE-clip seconds; the renderer maps them onto the edited timeline.
 """
@@ -272,16 +273,53 @@ def ollama_creative(words, duration, model, url="http://localhost:11434", timeou
 # --- EDL ----------------------------------------------------------------------------------------------------------
 
 TEASER_LEN, TEASER_MIN, TEASER_MIN_CLIP = 1.4, 1.2, 16.0
+SNAP_CLIMAX, SNAP_PEAK, SNAP_LINE = 1.35, 1.3, 1.25  # facecam punch-ins: the climax, a big yell, a "!" / "?" line
+SNAP_GAP, SNAP_HOLD = 2.0, 1.2  # s between two punch-ins; how long one holds (less when the next one comes sooner)
+YELL, SHAKE_LEN = 0.85, 0.2  # a peak >= 85% of the loudest (and 2.5x the median) is a yell: 0.2 s shake + thud
+WHOOSH_DB, THUD_DB = -16.0, -14.0  # SFX under the voice (the whole mix is loudnormed after)
+PITCH_DROP = 0.86  # the punchline plays ~2.6 semitones deeper
+
+
+def yell_level(env):
+    """Loud enough to be a yell: >= YELL of the peak AND >= 2.5x the median (a constant game / music bed is no yell)."""
+    return max(YELL, 2.5 * float(np.median(env))) if len(env) else 1.0
+
+
+def retention_fx(edl, words, env, climax, hop=HOP):
+    """Snap zooms (1.35x climax, 1.3x yells, 1.25x "!" / "?" lines; priority order, >= SNAP_GAP apart) each with a
+    whoosh; a SHAKE_LEN shake + thud on every yell; the punchline = the last kept word ending in "!" (else the word
+    at the climax) gets the pitch drop. Source seconds; moments the cuts removed are skipped."""
+    kept = lambda t: any(c["start"] <= t <= c["end"] for c in edl["cuts"])
+    yells = [q for q in peaks(env, hop) if env_at(env, q, hop) >= yell_level(env) and kept(q)]
+    cand = [(climax, SNAP_CLIMAX)] + [(q, SNAP_PEAK) for q in yells] \
+        + [(w["start"], SNAP_LINE) for w in words if w["word"].rstrip()[-1:] in "!?"]
+    starts = []
+    for t, scale in cand:
+        if kept(t) and all(abs(t - a) >= SNAP_GAP for a, _ in starts):
+            starts.append((t, scale))
+    starts.sort()
+    for k, (t, scale) in enumerate(starts):
+        nxt = starts[k + 1][0] - 0.2 if k + 1 < len(starts) else t + SNAP_HOLD
+        edl["zooms"].append({"at": round(t, 2), "duration": round(min(SNAP_HOLD, nxt - t), 2), "scale": scale})
+        edl["sfx"].append({"at": round(max(0.0, t - 0.1), 2), "name": "whoosh", "gain_db": WHOOSH_DB})
+    for q in yells:
+        edl["shakes"].append({"start": round(q, 2), "end": round(q + SHAKE_LEN, 2)})
+        edl["sfx"].append({"at": round(q, 2), "name": "thud", "gain_db": THUD_DB})
+    said = [w for w in words if kept((w["start"] + w["end"]) / 2)]
+    hit = next((w for w in reversed(said) if w["word"].rstrip()[-1:] == "!"), None) \
+        or min(said, key=lambda w: abs((w["start"] + w["end"]) / 2 - climax), default=None)
+    if hit:
+        edl["pitch"] = {"start": round(hit["start"], 2), "end": round(min(hit["end"], hit["start"] + 1.0), 2), "factor": PITCH_DROP}
 
 
 def build_edl(scenario, words, env, duration, hop=HOP, speech=()):
-    """Deterministic cuts / speed ramp / cold-open teaser for a scenario (all times in source seconds)."""
+    """Deterministic cuts / speed ramp / cold-open teaser / retention effects for a scenario (all source seconds)."""
     pk = peaks(env, hop) or [duration / 2]
     p = pk[0]  # loudest moment
     keep = lambda hi, gap=GAP: keep_spans(0.0, hi, words, speech, env, gap)  # opens on the first sound, no dead air
     last_word_end = words[-1]["end"] if words else duration
     edl = {"scenario": scenario, "hook_teaser": {"enabled": False, "start": 0.0, "end": 0.0, "banner_text": ""},
-           "cuts": [], "speed": [], "bg_music": {"enabled": False, "gain_db": -22.0}}
+           "cuts": [], "speed": [], "zooms": [], "shakes": [], "sfx": [], "bg_music": {"enabled": False, "gain_db": -22.0}}
     pivot = None
 
     if scenario == "chat_roast":  # calm setup -> the outburst
@@ -319,6 +357,7 @@ def build_edl(scenario, words, env, duration, hop=HOP, speech=()):
     fitted = fit_length(cuts, duration, MIN_LEN * max([sp["factor"] for sp in edl["speed"]] or [1.0]))
     edl["cuts"] = [{"start": s, "end": e} for s, e in word_safe([(c["start"], c["end"]) for c in fitted], words, duration, horror)]
     climax = pivot if pivot is not None else p
+    retention_fx(edl, words, env, climax, hop)
     # cold open: 1.2-1.5 s of a loud second-half climax first, then hard cut to the setup. Not for horror: showing
     # the scare first kills the jump.
     if not horror and duration >= TEASER_MIN_CLIP and climax >= 0.5 * duration and env_at(env, climax, hop) >= LOUD \
@@ -370,6 +409,8 @@ def direct(words, audio, duration, sr=16000, model=None, meta=None, framing=None
     if fr.get("source_captions"):
         layout = "blur_fill"
     edl["layout"], edl["source_captions"] = layout, bool(fr.get("source_captions"))  # theirs on screen: ours off
+    if layout != "split_stack":  # no webcam panel: no punch-ins / shake (the gameplay never moves); thuds + pitch stay
+        edl["zooms"], edl["shakes"], edl["sfx"] = [], [], [x for x in edl["sfx"] if x["name"] != "whoosh"]
     edl.update(archetype=scenario, title=creative["social_title"], hashtags=creative["hashtags"][:4],
                social_title=f"{creative['social_title']} {' '.join(creative['hashtags'][:4])}".strip(),
                directed_by="ollama" if ai else "heuristic", scenario_fit=(ai or {}).get("fit"))

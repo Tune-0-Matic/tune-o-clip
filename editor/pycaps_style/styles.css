@@ -1,4 +1,4 @@
-/* pycaps scales CSS px by ~3 on a 1920-tall short: 1.2px here = a ~4 px outline. No blurred shadow: html2pic
+/* pycaps scales CSS px by ~3 on a 1920-tall short: 22px = ~66 px letters, 1.2px = a ~4 px outline. No blurred shadow: html2pic
    clips it into a dark band under the word. Komika Axis ships with pycaps (hype template resources). */
 @font-face {
     font-family: 'Komika Axis';
@@ -7,7 +7,7 @@
 
 .word {
     font-family: 'Komika Axis';
-    font-size: 36px;
+    font-size: 22px;
     color: #FFFFFF;
     padding: 2px 7px;
     text-shadow:

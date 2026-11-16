@@ -45,8 +45,19 @@ env = director.energy(roast_a)
 assert director.classify(roast_w, env, dur) == "chat_roast"
 e = director.build_edl("chat_roast", roast_w, env, dur)
 
-NO_FX = ("zooms", "filters", "takeovers", "sfx", "mutes", "word_tones", "font", "freeze_end", "crop_track", "zoom_anchor")
-assert not any(k in e for k in NO_FX) and e["hook_teaser"]["enabled"], sorted(e)  # static framing; pycaps owns captions + cues
+NO_FX = ("filters", "takeovers", "mutes", "word_tones", "font", "freeze_end", "crop_track", "zoom_anchor")  # the old effect set
+assert not any(k in e for k in NO_FX) and e["hook_teaser"]["enabled"], sorted(e)  # pycaps owns captions + cues
+# retention effects: a 1.35x facecam punch-in + whoosh on the climax yell, 0.2 s shake + thud on it, pitch drop on "DOING"
+assert [(z["scale"], z["duration"]) for z in e["zooms"]] == [(director.SNAP_CLIMAX, director.SNAP_HOLD)] and abs(e["zooms"][0]["at"] - 13.5) < 0.3, e["zooms"]
+assert e["shakes"] and all(round(x["end"] - x["start"], 2) == director.SHAKE_LEN and abs(x["start"] - 13.5) < 0.3 for x in e["shakes"]), e["shakes"]
+assert sorted((x["name"], x["gain_db"]) for x in e["sfx"]) == [("thud", -14.0), ("whoosh", -16.0)], e["sfx"]
+assert e["pitch"]["factor"] == director.PITCH_DROP and abs(e["pitch"]["start"] - 13.3) < 0.01, e["pitch"]  # no "!": the word at the climax
+bang = director.build_edl("chat_roast", roast_w[:-1] + [dict(roast_w[-1], word="DOING!")], director.energy(roast_a), dur)
+assert abs(bang["pitch"]["start"] - 13.9) < 0.01, bang["pitch"]  # the last "!" word is the punchline
+lines_w = words_at([(w, 0.5 + i * 0.5) for i, w in enumerate("no way! what? stop it! why? no! go! yes?".split())])
+z = director.build_edl("chat_roast", lines_w, director.energy(roast_a), dur)["zooms"]
+assert len(z) >= 2 and all(1.25 <= q["scale"] <= 1.35 for q in z), z
+assert all(b["at"] - a["at"] >= director.SNAP_GAP and a["at"] + a["duration"] <= b["at"] for a, b in zip(z, z[1:])), "never overlapping"
 # the clip runs to its LAST peak, even when the loudest outburst came earlier
 two_w = words_at(calm + [("NO", 9.0), ("WAY", 9.3), ("okay", 17.0), ("anyway", 17.4)])
 two_a = tone_audio(dur, [(9.2, 0.6, 0.9), (17.2, 0.5, 0.5)])
@@ -98,7 +109,9 @@ for s in director.SCENARIOS:  # every scenario stays inside QC's length window
     assert director.MIN_LEN - 0.01 <= renderer.timeline(e)[1] <= director.MAX_LEN + 1, s
 d = director.direct(roast_w, roast_a, dur, framing=CAM)
 assert d["layout"] == "split_stack" and d["directed_by"] == "heuristic" and len(d["hashtags"]) == 4
-assert not d["source_captions"] and not any(k in d for k in NO_FX), sorted(d)
+assert not d["source_captions"] and not any(k in d for k in NO_FX) and d["zooms"], sorted(d)
+bf = director.direct(roast_w, roast_a, dur)  # no webcam: no punch-ins / shake (the gameplay never moves), thud + pitch stay
+assert bf["zooms"] == [] and bf["shakes"] == [] and [x["name"] for x in bf["sfx"]] == ["thud"] and bf["pitch"], bf["sfx"]
 twice = director.direct(roast_w, roast_a, dur, framing=dict(CAM, source_captions=True))
 assert twice["layout"] == "blur_fill", "split_stack would show the stream's captions in both panels"
 assert director.direct(roast_w, roast_a, dur)["layout"] == "blur_fill"  # no framing info: the safe full frame
@@ -360,9 +373,11 @@ real = {"scenario": "chat_roast", "layout": "split_stack",
         "hook_teaser": {"enabled": True, "start": 9.0, "end": 11.0, "banner_text": "WAIT FOR IT..."},
         "cuts": [{"start": 0.5, "end": 6.0}, {"start": 7.0, "end": 15.5}],
         "speed": [{"start": 0.5, "end": 4.0, "factor": 1.15}], "bg_music": {"enabled": False, "gain_db": -22},
-        # an older EDL's effects: ignored now (static framing, pycaps owns captions / cues)
-        "zooms": [{"at": 9.0, "duration": 0.8, "scale": 1.65, "style": "snap"}], "filters": [{"start": 9.0, "end": 9.9, "type": "reaction_boost"}],
-        "takeovers": [{"start": 8.8, "end": 10.5}], "sfx": [{"at": 9.0, "name": "vine_boom", "gain_db": -6}]}
+        "zooms": [{"at": 9.0, "duration": 0.8, "scale": 1.3}], "shakes": [{"start": 9.1, "end": 9.3}],
+        "sfx": [{"at": 8.9, "name": "whoosh", "gain_db": -16}, {"at": 9.1, "name": "thud", "gain_db": -14}],
+        "pitch": {"start": 9.1, "end": 9.4, "factor": 0.86},
+        # an older EDL's effects: ignored now
+        "filters": [{"start": 9.0, "end": 9.9, "type": "reaction_boost"}], "takeovers": [{"start": 8.8, "end": 10.5}]}
 spoken = words_at([("this", 1.0), ("is", 1.4), ("totally", 1.8), ("fine", 2.4), ("WHAT!", 9.1)])
 limits = {"max_dur": 10.0, "min_dur": 5.0}  # tight cap so the first render must fail
 cam = (0.0, 0.0, 0.3, 0.4)
@@ -375,8 +390,13 @@ assert not final["hook_teaser"]["enabled"] and final["cuts"][-1]["end"] == 15.5 
 cmd = json.loads((tmp / "work" / "ffmpeg_cmd.json").read_text())
 graph = cmd[cmd.index("-filter_complex") + 1]
 assert "vstack" in graph and "pad=1080:694" in graph
-for needle in ("zoompan", "overlay=0:0:enable=", "eq=", "rgbashift", "hue=", "subtitles=", "drawtext", "adelay"):
-    assert needle not in graph, needle  # no zoom / effect / SFX / ffmpeg caption filters
+for needle in ("overlay=0:0:enable=", "eq=", "rgbashift", "hue=", "subtitles=", "drawtext"):
+    assert needle not in graph, needle  # no old effect filters / ffmpeg captions
+cam_line = next(l for l in graph.split(";") if l.startswith("[cs]"))
+game_line = next(l for l in graph.split(";") if l.startswith("[gs]"))
+assert "zoompan=z='min(1.35,1+" in cam_line and "crop=w=iw-12:h=ih-12" in cam_line, cam_line  # facecam: punch-in + shake
+assert "zoompan" not in game_line and "crop=w=iw-12" not in game_line, "the gameplay panel never moves"
+assert "asetrate=48000*0.86,aresample=48000,atempo=1.1628" in graph and graph.count("adelay=") == 2, graph
 assert cmd[-1].endswith("base.mp4") and not (tmp / "work" / "base.mp4").exists(), "pycaps wrote the short; the base is gone"
 burned = json.loads((tmp / "work" / "captions.json").read_text(encoding="utf-8"))
 assert [w["word"] for sg in burned["segments"] for w in sg["words"]] == ["WHAT!"], burned  # the repair trimmed the setup away
@@ -385,7 +405,7 @@ plain_out = renderer.render(src, dict(final, source_captions=True), spoken, tmp 
 assert json.loads((tmp / "plain_work" / "ffmpeg_cmd.json").read_text())[-1] == str(plain_out), "no captions: ffmpeg writes the short itself"
 t_word = burned["segments"][0]["words"][0]["start"] + 0.2  # past the 0.14 s pop-in
 band = lambda pth: np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t_word:.2f}", "-i", str(pth), "-frames:v", "1", "-vf",
-                                                 "crop=1080:400:0:1080,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout, np.uint8).astype(int)
+                                                 "crop=1080:200:0:783,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout, np.uint8).astype(int)
 diff = np.abs(band(tmp / "work" / "short.mp4") - band(plain_out)).mean()
 assert diff > 3, ("no caption pixels in the caption band", diff)
 bf_cmd = renderer.build_command(src, dict(real, layout="blur_fill"), tmp / "bf.mp4", renderer.probe(src))

@@ -190,14 +190,19 @@ python backend/clipper.py URL --auto-edit                    # single runs too
    VAD speech (bundled with faster-whisper) + loud reactions are kept, every silence > 0.35 s is cut (0.25 s in
    `unfiltered_chaos`), 0.1 s pad. `edl.json` times are source seconds. A 1.2-1.5 s cold open of a loud second-half
    climax on clips >= 16 s (never for horror); `confident_fail` plays its setup at 1.15x; horror cuts 0.4 s after
-   the scare. No zooms, effect filters or SFX.
+   the scare. Retention effects (`retention_fx`): facecam snap zooms 1.35x climax / 1.3x yells / 1.25x "!" "?" lines
+   (>= 2 s apart, held <= 1.2 s) each with a -16 dB whoosh; a 0.2 s +-6 px facecam shake + -14 dB thud on every yell
+   (>= 85% of the peak and 2.5x the median); the punchline (last kept "!" word, else the word at the climax) pitched
+   down 0.86 (`asetrate` + `atempo`, so the length and sync stay). Zooms / shake only on split_stack's webcam panel.
 4. **Renderer** (`renderer.py`):
    - ffmpeg pass: trims + concat, `split_stack` (facecam 1080x690 on top, 4 px seam, gameplay 1080x1226) or
-     `blur_fill` (sharp 16:9 over a quarter-res blurred fill); audio = original + speed ramps (`atempo`), music from
+     `blur_fill` (sharp 16:9 over a quarter-res blurred fill), the facecam effects; audio = original + speed ramps
+     (`atempo`) + punchline pitch + whoosh / thud (procedural, `assets/sfx/`, your own file wins), music from
      `assets/music/` ducked under speech, `loudnorm=I=-14:TP=-1.5:LRA=11`. Encoder: h264_nvenc / h264_vaapi when a
      probe encode works, else libx264 superfast crf 20 (NVENC: p3, cq 22). Always 30 fps.
    - Captions + sound cues: [pycaps](https://github.com/francozanardi/pycaps) (MIT, `editor/captions.py`, its own
-     process; style in `editor/pycaps_style/`): 1-3 word uppercase Komika Axis lines, the active word zooms in and
+     process; style in `editor/pycaps_style/`): 1-3 word uppercase Komika Axis lines (~66 px), centred at 46% of
+     the height on split_stack (just under the webcam seam) / 72% on blur_fill; the active word zooms in and
      turns yellow, hype words (regex: "no", "what", "bro", "let's go", "gta", "cops"...) green / red with a soft pop
      cue. Word times = Whisper on each render's own cut audio (`renderer.cut_audio`), so captions match the cuts;
      none when the source has its own captions. Browser-free renderer (html2pic), no AI service. Its encode is

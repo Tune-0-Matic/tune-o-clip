@@ -2,18 +2,23 @@
 
 1. One ffmpeg pass: frame-accurate trims (+ speed ramps) + concat -> 9:16 framing (split_stack = a verified corner
    webcam on top + full-width gameplay below, else blur_fill = the whole frame over a blurred copy; see framing.py)
-   -> audio: original + ducked music -> loudnorm -14 LUFS. No zooms or effect filters. Never AV1: NVENC / VAAPI /
-   libx264 H.264.
-2. pycaps (editor/captions.py): captions + sound cues on the framed short, timed by caption_doc().
+   + the retention effects (cam_fx: snap zooms + yell shake on the FACECAM panel only, gameplay never moves) ->
+   audio: original with the punchline pitch drop + whoosh / thud SFX + ducked music -> loudnorm -14 LUFS.
+   Never AV1: NVENC / VAAPI / libx264 H.264.
+2. pycaps (editor/captions.py): captions + sound cues on the framed short, timed by caption_doc(), at CAPTION_Y.
 """
 import json
 import os
 import subprocess
 import sys
+import wave
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parent.parent
-MUSIC_DIR = ROOT / "assets" / "music"
+MUSIC_DIR, SFX_DIR = ROOT / "assets" / "music", ROOT / "assets" / "sfx"
+SFX_NAMES = ("whoosh", "thud")
 W, H = 1080, 1920
 CAM_H, BORDER = 690, 4  # split_stack: facecam top 36%, 4 px seam, gameplay below
 GAME_H = H - CAM_H - BORDER
@@ -118,14 +123,15 @@ def caption_doc(edl, words, out_words=None):
 
 # SETTINGS caption theme (edl["caption_tone"]) -> the active word's colour
 CAPTION_COLORS = {"punch": "#FFE600", "hype": "#3DFF5A", "rage": "#FF3B3B", "roast": "#00E5FF"}
+CAPTION_Y = {"split_stack": 0.46, "blur_fill": 0.72}  # caption block centre: just under the webcam seam / lower third
 CAPTION_TIMEOUT = 900  # s: pycaps composites every frame in Python (~25 fps at 1080x1920 on the i7-860)
 
 
-def burn_captions(src, out, doc, workdir, color=None):
+def burn_captions(src, out, doc, workdir, y=CAPTION_Y["blur_fill"], color=None):
     """pycaps pass (editor/captions.py, own process) over a rendered short -> out."""
     (Path(workdir) / "captions.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")  # kept for debugging
     Path(out).unlink(missing_ok=True)  # pycaps refuses to overwrite: a QC repair re-renders onto the same path
-    cmd = [sys.executable, str(Path(__file__).with_name("captions.py")), str(src), str(out), str(Path(workdir) / "captions.json")]
+    cmd = [sys.executable, str(Path(__file__).with_name("captions.py")), str(src), str(out), str(Path(workdir) / "captions.json"), f"{y:.3f}"]
     p = subprocess.run(cmd + ([color] if color else []), cwd=workdir, capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=CAPTION_TIMEOUT)
     if p.returncode != 0 or not Path(out).exists():
@@ -172,6 +178,69 @@ def probe(path):
             "has_audio": any(s["codec_type"] == "audio" for s in d["streams"])}
 
 
+# --- retention effects (pre-pycaps, inside the one ffmpeg pass) -----------------------------------------------------
+
+def sfx_file(name, folder=SFX_DIR):
+    """User-dropped .mp3/.wav wins over the generated .wav (an .mp3 can sit next to the generated file)."""
+    for ext in (".mp3", ".wav"):
+        if (Path(folder) / f"{name}{ext}").exists():
+            return Path(folder) / f"{name}{ext}"
+    return None
+
+
+def ensure_sfx(folder=SFX_DIR, sr=48000):
+    """Synthesize the whoosh / thud (numpy + wave) when there is no file yet, so SFX work out of the box."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(7)
+    osc = lambda freqs: np.sin(2 * np.pi * np.cumsum(freqs) / sr)
+    for name in SFX_NAMES:
+        if sfx_file(name, folder):
+            continue
+        if name == "thud":  # clean low-end boom: 110 -> 45 Hz sine drop, soft click, no distortion (sits under a voice)
+            t = np.arange(int(0.7 * sr)) / sr
+            x = (osc(45 + 65 * np.exp(-t * 14)) + 0.15 * rng.standard_normal(len(t)) * np.exp(-t * 300)) \
+                * np.minimum(1, t / 0.002) * np.exp(-t / 0.18)
+        else:  # whoosh: noise swept through a resonant band
+            t = np.arange(int(0.7 * sr)) / sr
+            x = rng.standard_normal(len(t)) * (0.5 + 0.5 * osc(300 + 2500 * (t / t[-1]))) * np.sin(np.pi * t / t[-1]) ** 2
+        x = (x / (np.abs(x).max() or 1) * 0.9 * 32767).astype(np.int16)
+        with wave.open(str(folder / f"{name}.wav"), "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(sr)
+            f.writeframes(x.tobytes())
+    return folder
+
+
+def cam_fx(edl, segs, w, h, fps):
+    """Facecam panel only: held snap zooms (zoompan about (0.5, 0.3): split_stack's crop puts the head in the panel's
+    upper half, so hair stays in at 1.35x) + a 0.2 s +-6 px shake on every yell. Moments the cuts removed are skipped."""
+    chain = []
+    zooms = [(o, z) for z in edl.get("zooms", []) if (o := to_out(z["at"], segs)) is not None]
+    if zooms:
+        terms = "+".join(f"between(it,{o:.3f},{o + z['duration']:.3f})*{z['scale'] - 1:.3f}" for o, z in zooms)
+        chain.append(f"zoompan=z='min(1.35,1+{terms})':x='(iw-iw/zoom)*0.5':y='(ih-ih/zoom)*0.3':d=1:s={w}x{h}:fps={fps}")
+    shakes = [(o, o + sh["end"] - sh["start"]) for sh in edl.get("shakes", []) if (o := to_out(sh["start"], segs)) is not None]
+    if shakes:
+        amp = "+".join(f"between(t,{a:.3f},{b:.3f})*6" for a, b in shakes)
+        chain.append(f"crop=w=iw-12:h=ih-12:x='6+({amp})*sin(113*t)':y='6+({amp})*cos(97*t)',scale={w}:{h}")
+    return "".join("," + c for c in chain)
+
+
+def pitch_graph(a, edl, segs):
+    """The punchline's pitch drop (edl["pitch"] factor 0.86 = deep, 1.14 = up): asetrate shifts the pitch and also
+    stretches time, so atempo puts the length back and the video stays in sync. -> (filter lines, output label)."""
+    p = edl.get("pitch")
+    s, e = (to_out(p["start"], segs), to_out(p["end"], segs)) if p else (None, None)
+    if s is None or e is None or s < 0.05 or e - s < 0.1:
+        return [], a
+    f = float(p["factor"])
+    return [f"{a}asplit=3[p0][p1][p2]", f"[p0]atrim=end={s:.3f},asetpts=PTS-STARTPTS[q0]",
+            f"[p1]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS,asetrate=48000*{f:g},aresample=48000,atempo={1 / f:.4f}[q1]",
+            f"[p2]atrim=start={e:.3f},asetpts=PTS-STARTPTS[q2]", "[q0][q1][q2]concat=n=3:v=0:a=1[pa]"], "[pa]"
+
+
 # --- filter graph ------------------------------------------------------------------------------------------------
 
 def cut_graph(segs):
@@ -197,8 +266,8 @@ def cut_audio(src, edl, out):
     return Path(out)
 
 
-def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUSIC_DIR):
-    """-> ffmpeg argv: cuts -> 9:16 framing (no zooms / effects / captions) -> original audio + ducked music -> loudnorm."""
+def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUSIC_DIR, sfx_dir=SFX_DIR):
+    """-> ffmpeg argv: cuts -> 9:16 framing + facecam effects (no captions) -> audio + pitch + SFX + music -> loudnorm."""
     _, gargs, vf_tail, codec = encoder or detect_encoder()
     segs, _ = timeline(edl)
     fps = 30  # the platforms play 30; 60 doubled the caption pass's per-frame work for nothing
@@ -214,7 +283,7 @@ def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUS
         x, y, cw, ch = facecam
         fc.append("[vb]split=2[cs][gs]")
         fc.append(f"[cs]crop=iw*{cw}:ih*{ch}:iw*{x}:ih*{y},scale={W}:{CAM_H}:force_original_aspect_ratio=increase,"
-                  f"crop={W}:{CAM_H},pad={W}:{CAM_H + BORDER}:0:0:color=0x0b0c0d[cam]")
+                  f"crop={W}:{CAM_H}{cam_fx(edl, segs, W, CAM_H, fps)},pad={W}:{CAM_H + BORDER}:0:0:color=0x0b0c0d[cam]")
         fc.append(f"[gs]scale=-2:{GAME_H},crop={W}:{GAME_H}[game]")
         fc.append("[cam][game]vstack[lay]")
     else:  # the whole frame, sharp and centred over a blurred copy of itself
@@ -228,16 +297,27 @@ def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUS
 
     music = sorted(p for p in Path(music_dir).glob("*") if p.suffix.lower() in (".mp3", ".wav")) if music_dir and Path(music_dir).exists() else []
     use_music = edl.get("bg_music", {}).get("enabled") and music
-    tail = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]"
-    main = f"{a}aformat=sample_rates=48000:channel_layouts=stereo"
+    fc.append(f"{a}aformat=sample_rates=48000:channel_layouts=stereo[a48]")
+    pitch, a = pitch_graph("[a48]", edl, segs)
+    fc += pitch
+    fc.append(a + ("asplit=2[main][side]" if use_music else "anull[main]"))
+    mix, k = ["[main]"], 1
+    for fx in edl.get("sfx", []):
+        f, at = sfx_file(fx["name"], sfx_dir), to_out(fx["at"], segs)
+        if f is None or at is None:
+            continue  # missing asset or the moment was cut: skip quietly
+        inputs += ["-i", str(f)]
+        ms = int(at * 1000)
+        fc.append(f"[{k}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={fx['gain_db']:.1f}dB,adelay={ms}|{ms}[sx{k}]")
+        mix.append(f"[sx{k}]")
+        k += 1
     if use_music:
         inputs += ["-stream_loop", "-1", "-i", str(music[0])]
-        fc.append(main + ",asplit=2[main][side]")
-        fc.append(f"[1:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={edl['bg_music']['gain_db']:.1f}dB[mu]")
+        fc.append(f"[{k}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={edl['bg_music']['gain_db']:.1f}dB[mu]")
         fc.append("[mu][side]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[duck]")
-        fc.append(f"[main][duck]amix=inputs=2:normalize=0:duration=first,{tail}")
-    else:
-        fc.append(f"{main},{tail}")
+        mix.append("[duck]")
+    tail = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]"
+    fc.append("".join(mix) + f"amix=inputs={len(mix)}:normalize=0:duration=first,{tail}" if len(mix) > 1 else f"[main]{tail}")
 
     threads = ["-filter_complex_threads", "4", "-threads", "4"] if os.environ.get("TOC_LOW_SPEC") == "1" else []  # i7-860 stays usable
     return ["ffmpeg", "-v", "error", "-y", *threads[:2], *gargs, *inputs, "-filter_complex", ";".join(fc), "-map", "[vout]", "-map", "[aout]",
@@ -252,6 +332,7 @@ def render(src, edl, words, out, workdir, encoder=None, facecam=None, out_words=
     info = probe(src)
     if not info["has_audio"]:
         raise RuntimeError(f"{src} has no audio track")
+    ensure_sfx()
     doc = {"segments": []} if edl.get("source_captions") else caption_doc(edl, words, out_words)
     base = workdir.resolve() / "base.mp4" if doc["segments"] else out
     cmd = build_command(Path(src).resolve(), edl, base, info, encoder, facecam)
@@ -260,6 +341,7 @@ def render(src, edl, words, out, workdir, encoder=None, facecam=None, out_words=
     if p.returncode != 0:
         raise RuntimeError("ffmpeg render failed:\n" + p.stderr.strip()[-1500:])
     if base != out:
-        burn_captions(base, out, doc, workdir, CAPTION_COLORS.get(edl.get("caption_tone")))
+        y = CAPTION_Y["split_stack" if edl.get("layout") == "split_stack" and facecam else "blur_fill"]
+        burn_captions(base, out, doc, workdir, y, CAPTION_COLORS.get(edl.get("caption_tone")))
         base.unlink()
     return out

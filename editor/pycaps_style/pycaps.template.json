@@ -4,7 +4,7 @@
         "max_width_ratio": 0.86,
         "max_number_of_lines": 2,
         "min_number_of_lines": 1,
-        "vertical_align": {"align": "center", "offset": 0.17}
+        "vertical_align": {"align": "center", "offset": 0.22}
     },
     "effects": [
         {"type": "remove_punctuation_marks", "punctuation_marks": [".", ","], "exception_marks": ["..."]}
