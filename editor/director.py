@@ -415,4 +415,22 @@ def direct(words, audio, duration, sr=16000, model=None, meta=None, framing=None
                social_title=f"{creative['social_title']} {' '.join(creative['hashtags'][:4])}".strip(),
                directed_by="ollama" if ai else "heuristic", scenario_fit=(ai or {}).get("fit"))
     edl["bg_music"]["enabled"] = bool(music)
+    if (meta or {}).get("tone") == "emotional_story":  # scorer.ollama_tone: any strong feeling, not only sad
+        story_profile(edl, duration, (meta or {}).get("emotion"))
+    return edl
+
+
+STORY_PAD = 0.15  # more air around every cut: the renderer's 0.3 s crossfades land in the pause, not on a word
+
+
+def story_profile(edl, duration, emotion=None):
+    """The emotional_story edit: no snap zooms, shakes, pitch drop, whoosh / thud, speed-up or cold-open teaser (the
+    hype_chaos edit stays exactly as it was); the renderer adds the grade, the slow push-in, the crossfades, the
+    ambient bed and the calm captions. Cuts get STORY_PAD more air each side (pieces that then touch merge)."""
+    edl.update(profile="emotional_story", emotion=emotion, zooms=[], shakes=[], sfx=[], speed=[])
+    edl.pop("pitch", None)
+    edl["hook_teaser"]["enabled"] = False
+    edl["cuts"] = [{"start": round(s, 2), "end": round(e, 2)} for s, e in
+                   merge([(max(0.0, c["start"] - STORY_PAD), min(duration, c["end"] + STORY_PAD)) for c in edl["cuts"]])]
+    edl["bg_music"]["enabled"] = True  # the renderer's own ambient bed (assets/music/<bed>.wav, generated if missing)
     return edl

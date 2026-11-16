@@ -313,6 +313,7 @@ def recent_duplicate(streamer, text, roots, job, now=None, any_age=()):
 def write_manifest(job, info, clips, extra=None):
     keys = ("clip_id", "file", "start_sec", "end_sec", "duration", "setup_start_sec", "setup_end_sec", "score", "reason", "judge_reason", "transcript",
             "llm", "pillars", "judge_reject", "vocal", "visual", "cue", "words",  # the full score breakdown (calibration_studio)
+            "tone", "emotion", "resonance",  # the judge's emotional_story read: picks the editor's profile
             "title_angles", "hashtags", "pinned_comment")  # the approved clip's post card (scorer.ollama_metadata)
     manifest = {"video_id": info["id"], "title": info.get("title"), "url": info.get("webpage_url"), **(extra or {}),
                 "clips": [{k: c.get(k) for k in keys} for c in clips]}

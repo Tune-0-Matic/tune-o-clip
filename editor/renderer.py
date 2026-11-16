@@ -6,6 +6,9 @@
    audio: original with the punchline pitch drop + whoosh / thud SFX + ducked music -> loudnorm -14 LUFS.
    Never AV1: NVENC / VAAPI / libx264 H.264.
 2. pycaps (editor/captions.py): captions + sound cues on the framed short, timed by caption_doc(), at CAPTION_Y.
+edl["profile"] == "emotional_story" (director.story_profile) swaps the hype parts out: 0.3 s crossfades between the
+cuts, a cool (sad / nostalgic) or warm (wholesome / proud) grade + vignette, a slow 1.0 -> 1.07x push-in, a generated
+ambient piano / pad bed at -25 dB (fades + ducking) and calm sentence-case captions in the lower third.
 """
 import json
 import os
@@ -43,17 +46,35 @@ def _split_by_speed(edl):
     return out
 
 
+XFADE = 0.3  # emotional_story: crossfade between cuts (s)
+
+
+def story(edl):
+    return edl.get("profile") == "emotional_story"
+
+
+def xfade_len(edl, pieces):
+    """The crossfade an emotional_story uses for these [(start, end, speed)] pieces: XFADE, shorter when a piece is
+    too short to give up its head and tail (xfade needs both); 0 for the hype edit or a single piece."""
+    if not story(edl) or len(pieces) < 2:
+        return 0.0
+    return round(min(XFADE, min((e - s) / sp for s, e, sp in pieces) / 2.5), 3)
+
+
 def timeline(edl):
-    """[(src_start, src_end, out_start, is_teaser, speed)] in output order, and the total output length."""
+    """[(src_start, src_end, out_start, is_teaser, speed)] in output order, and the total output length (each
+    emotional_story crossfade overlaps two pieces: the timeline is xfade_len shorter per join)."""
     segs, t = [], 0.0
     hook = edl.get("hook_teaser") or {}
     if hook.get("enabled") and hook["end"] > hook["start"]:
         segs.append((hook["start"], hook["end"], 0.0, True, 1.0))
         t = hook["end"] - hook["start"]
-    for s, e, sp in _split_by_speed(edl):
+    pieces = _split_by_speed(edl)
+    xf = xfade_len(edl, pieces)
+    for s, e, sp in pieces:
         segs.append((s, e, t, False, sp))
-        t += (e - s) / sp
-    return segs, t + float(edl.get("freeze_end") or 0)
+        t += (e - s) / sp - xf
+    return segs, t + (xf if pieces else 0.0) + float(edl.get("freeze_end") or 0)
 
 
 def to_out(src_t, segs):
@@ -78,8 +99,9 @@ def main_length(segs):
 
 # --- captions (pycaps, editor/captions.py) ------------------------------------------------------------------------
 
-def clean(word):
-    return "".join(ch for ch in str(word).strip().upper() if ch not in "{}\\")
+def clean(word, upper=True):
+    w = str(word).strip()
+    return "".join(ch for ch in (w.upper() if upper else w) if ch not in "{}\\")
 
 
 def chunk(words, size=3, span=1.3, gap=0.35):
@@ -97,9 +119,11 @@ def chunk(words, size=3, span=1.3, gap=0.35):
 
 
 def caption_doc(edl, words, out_words=None):
-    """The caption track as pycaps whisper_json, in OUTPUT seconds: 1-3 word uppercase lines, one on screen at a time
-    (each ends 20 ms before the next starts). out_words: Whisper words of the cut audio itself (cut_audio), already in
-    output time: used as they are. Without them the source `words` are mapped through the cuts."""
+    """The caption track as pycaps whisper_json, in OUTPUT seconds: 1-3 word uppercase lines (emotional_story: up to 5
+    words in sentence case, <= 2.4 s), one on screen at a time (each ends 20 ms before the next starts). out_words:
+    Whisper words of the cut audio itself (cut_audio), already in output time: used as they are. Without them the
+    source `words` are mapped through the cuts."""
+    upper = not story(edl)
     placed = []
     for s, e, o, _, sp in timeline(edl)[0]:
         if out_words is None:
@@ -110,11 +134,12 @@ def caption_doc(edl, words, out_words=None):
             placed += [dict(w, ostart=max(w["start"], o), oend=min(w["end"], oe))
                        for w in out_words if o <= (w["start"] + w["end"]) / 2 < oe and clean(w["word"])]
     # a word straddling a jump cut lands in both segments: its 1-2 frame sliver (< 60 ms) is dropped
-    groups = chunk(sorted((w for w in placed if w["oend"] - w["ostart"] >= 0.06), key=lambda w: w["ostart"]))
+    groups = chunk(sorted((w for w in placed if w["oend"] - w["ostart"] >= 0.06), key=lambda w: w["ostart"]),
+                   *((3, 1.3) if upper else (5, 2.4)))
     segments = []
     for k, g in enumerate(groups):
         stop = groups[k + 1][0]["ostart"] - 0.02 if k + 1 < len(groups) else 1e9
-        ws = [{"word": clean(w["word"]), "start": round(w["ostart"], 3), "end": round(min(w["oend"], stop), 3)} for w in g]
+        ws = [{"word": clean(w["word"], upper), "start": round(w["ostart"], 3), "end": round(min(w["oend"], stop), 3)} for w in g]
         ws = [w for w in ws if w["end"] > w["start"]]
         if ws:
             segments.append({"start": ws[0]["start"], "end": ws[-1]["end"], "words": ws})
@@ -123,15 +148,16 @@ def caption_doc(edl, words, out_words=None):
 
 # SETTINGS caption theme (edl["caption_tone"]) -> the active word's colour
 CAPTION_COLORS = {"punch": "#FFE600", "hype": "#3DFF5A", "rage": "#FF3B3B", "roast": "#00E5FF"}
-CAPTION_Y = {"split_stack": 0.46, "blur_fill": 0.72}  # caption block centre: just under the webcam seam / lower third
+CAPTION_Y = {"split_stack": 0.46, "blur_fill": 0.72, "story": 0.80}  # caption block centre: under the webcam seam /
+#                                                                       lower third / emotional_story lower third
 CAPTION_TIMEOUT = 900  # s: pycaps composites every frame in Python (~25 fps at 1080x1920 on the i7-860)
 
 
-def burn_captions(src, out, doc, workdir, y=CAPTION_Y["blur_fill"], color=None):
-    """pycaps pass (editor/captions.py, own process) over a rendered short -> out."""
+def burn_captions(src, out, doc, workdir, y=CAPTION_Y["blur_fill"], color=None, style="pop"):
+    """pycaps pass (editor/captions.py, own process) over a rendered short -> out. style: pop | story."""
     (Path(workdir) / "captions.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")  # kept for debugging
     Path(out).unlink(missing_ok=True)  # pycaps refuses to overwrite: a QC repair re-renders onto the same path
-    cmd = [sys.executable, str(Path(__file__).with_name("captions.py")), str(src), str(out), str(Path(workdir) / "captions.json"), f"{y:.3f}"]
+    cmd = [sys.executable, str(Path(__file__).with_name("captions.py")), str(src), str(out), str(Path(workdir) / "captions.json"), f"{y:.3f}", style]
     p = subprocess.run(cmd + ([color] if color else []), cwd=workdir, capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=CAPTION_TIMEOUT)
     if p.returncode != 0 or not Path(out).exists():
@@ -241,24 +267,100 @@ def pitch_graph(a, edl, segs):
             f"[p2]atrim=start={e:.3f},asetpts=PTS-STARTPTS[q2]", "[q0][q1][q2]concat=n=3:v=0:a=1[pa]"], "[pa]"
 
 
+# --- emotional_story look + ambient bed -----------------------------------------------------------------------------
+
+STORY_PUSH = 0.07  # 1.0 -> 1.07x over the whole short
+WARM = {"wholesome", "grateful", "thankful", "proud", "inspiring", "inspired", "happy", "hopeful", "joy", "joyful",
+        "love", "loving", "excited", "touching", "heartfelt", "relieved", "reunion"}  # every other feeling grades cool
+STORY_GRADE = {"cool": "eq=saturation=0.78:contrast=1.06,colorbalance=rs=-0.04:bs=0.05:rh=-0.02:bh=0.03,vignette=PI/5",
+               "warm": "eq=saturation=0.85:contrast=1.06,colorbalance=rs=0.05:bs=-0.04:rh=0.03:bh=-0.02,vignette=PI/5"}
+STORY_BEDS = {"sad_ambient": [(57, 60, 64), (53, 57, 60), (48, 52, 55), (55, 59, 62)],    # Am F C G (minor)
+              "warm_ambient": [(48, 52, 55), (55, 59, 62), (57, 60, 64), (53, 57, 60)]}   # C G Am F (major)
+STORY_MUSIC_DB = -25.0
+
+
+def story_tint(edl):
+    return "warm" if str(edl.get("emotion") or "").lower() in WARM else "cool"
+
+
+def ensure_story_bed(name, folder=MUSIC_DIR, sr=48000, chord_s=4.0):
+    """assets/music/<name>.wav: a 16 s seamless ambient loop (numpy + wave, royalty-free by construction): a slow pad
+    (each chord a Hann-windowed swell overlapping the next) + a soft decaying piano arpeggio + a short echo. A user's
+    own <name>.mp3 / .wav in assets/music wins."""
+    if f := sfx_file(name, folder):
+        return f
+    Path(folder).mkdir(parents=True, exist_ok=True)
+    chords = STORY_BEDS[name]
+    n = int(len(chords) * chord_s * sr)
+    t = np.arange(n) / sr
+    hz = lambda m: 440.0 * 2 ** ((m - 69) / 12)
+    x = np.zeros(n)
+    span = int(chord_s * 1.5 * sr)  # each swell lasts 1.5 chords: neighbours overlap, no dips
+    win = np.hanning(span)
+    for k, chord in enumerate(chords):
+        idx = (int(k * chord_s * sr - 0.25 * chord_s * sr) + np.arange(span)) % n  # wraps: the loop is seamless
+        tt = np.arange(span) / sr
+        pad = sum(np.sin(2 * np.pi * hz(m) * tt) + 0.5 * np.sin(2 * np.pi * (hz(m) * 2 + 0.4) * tt) for m in chord)
+        x[idx] += 0.25 * pad * win
+        for j, m in enumerate(list(chord) + [chord[0] + 12]):  # piano: root, third, fifth, octave, one per second
+            start = int((k * chord_s + j) * sr)
+            tt = np.arange(int(2.5 * sr)) / sr
+            note = (np.sin(2 * np.pi * hz(m + 12) * tt) + 0.35 * np.sin(4 * np.pi * hz(m + 12) * tt)) \
+                * np.minimum(1, tt / 0.006) * np.exp(-tt / 0.9)
+            x[(start + np.arange(len(tt))) % n] += 0.45 * note
+    x = x + 0.3 * np.roll(x, int(0.37 * sr)) + 0.15 * np.roll(x, int(0.74 * sr))  # roll: the echo wraps too
+    x = (x / (np.abs(x).max() or 1) * 0.8 * 32767).astype(np.int16)
+    path = Path(folder) / f"{name}.wav"
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sr)
+        f.writeframes(x.tobytes())
+    return path
+
+
+def user_music(folder=MUSIC_DIR):
+    """The hype edit's background music: the user's .mp3 / .wav in assets/music, never the generated story beds."""
+    folder = Path(folder)
+    return sorted(p for p in folder.glob("*") if p.suffix.lower() in (".mp3", ".wav") and p.stem not in STORY_BEDS) \
+        if folder.exists() else []
+
+
 # --- filter graph ------------------------------------------------------------------------------------------------
 
-def cut_graph(segs):
+def cut_graph(segs, xf=0.0):
     """The cuts as filtergraph lines -> [vc][ac]. concat stretches each piece to its longer stream (video trims land on
-    whole frames), so the real timeline drifts a little from timeline()'s ideal one over many cuts."""
+    whole frames), so the real timeline drifts a little from timeline()'s ideal one over many cuts. xf > 0
+    (emotional_story): pieces are chained with xfade / acrossfade of xf s instead (30 fps + one timebase first: xfade
+    needs both inputs alike), each join starting xf before the running end."""
     n = len(segs)
     fc = [f"[0:v]split={n}" + "".join(f"[vs{i}]" for i in range(n)), f"[0:a]asplit={n}" + "".join(f"[as{i}]" for i in range(n))]
+    norm_v = ",fps=30,settb=AVTB" if xf else ""
+    norm_a = ",aformat=sample_rates=48000:channel_layouts=stereo" if xf else ""
     for i, (s, e, _, _, sp) in enumerate(segs):
-        fc.append(f"[vs{i}]trim=start={s:.3f}:end={e:.3f},setpts=(PTS-STARTPTS)/{sp:.4f}[v{i}]")
-        fc.append(f"[as{i}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS" + (f",atempo={sp:.4f}" if sp != 1 else "") + f"[a{i}]")
-    fc.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[vc][ac]")
+        fc.append(f"[vs{i}]trim=start={s:.3f}:end={e:.3f},setpts=(PTS-STARTPTS)/{sp:.4f}{norm_v}[v{i}]")
+        fc.append(f"[as{i}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS" + (f",atempo={sp:.4f}" if sp != 1 else "") + f"{norm_a}[a{i}]")
+    if not xf or n < 2:
+        fc.append("".join(f"[v{i}][a{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=1[vc][ac]")
+        return fc
+    v, a, length = "[v0]", "[a0]", (segs[0][1] - segs[0][0]) / segs[0][4]
+    for i in range(1, n):
+        ov, oa = ("[vc]", "[ac]") if i == n - 1 else (f"[vx{i}]", f"[ax{i}]")
+        fc.append(f"{v}[v{i}]xfade=transition=fade:duration={xf:.3f}:offset={length - xf:.3f}{ov}")
+        fc.append(f"{a}[a{i}]acrossfade=d={xf:.3f}{oa}")
+        v, a, length = ov, oa, length + (segs[i][1] - segs[i][0]) / segs[i][4] - xf
     return fc
+
+
+def story_xf(edl, segs):
+    return xfade_len(edl, [(s, e, sp) for s, e, _, teaser, sp in segs if not teaser])
 
 
 def cut_audio(src, edl, out):
     """The render's own speech track (cuts, teaser and speed ramps; no SFX / music / loudnorm) as a 16 kHz mono WAV
     for Whisper. The video runs through the same trims to a null output so concat pads exactly as in the render."""
-    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-filter_complex", ";".join(cut_graph(timeline(edl)[0])),
+    segs = timeline(edl)[0]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-filter_complex", ";".join(cut_graph(segs, story_xf(edl, segs))),
            "-map", "[ac]", "-ac", "1", "-ar", "16000", str(out), "-map", "[vc]", "-f", "null", "-"]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:
@@ -269,10 +371,10 @@ def cut_audio(src, edl, out):
 def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUSIC_DIR, sfx_dir=SFX_DIR):
     """-> ffmpeg argv: cuts -> 9:16 framing + facecam effects (no captions) -> audio + pitch + SFX + music -> loudnorm."""
     _, gargs, vf_tail, codec = encoder or detect_encoder()
-    segs, _ = timeline(edl)
+    segs, length = timeline(edl)
     fps = 30  # the platforms play 30; 60 doubled the caption pass's per-frame work for nothing
     inputs = ["-i", str(src)]
-    fc = cut_graph(segs)
+    fc = cut_graph(segs, story_xf(edl, segs))
     freeze = float(edl.get("freeze_end") or 0)
     v, a = "[vc]", "[ac]"
     if freeze > 0:
@@ -293,9 +395,18 @@ def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUS
         fc.append(f"[bgs]scale={W // 4}:{H // 4}:force_original_aspect_ratio=increase,crop={W // 4}:{H // 4},boxblur=8:2,scale={W}:{H}[bg]")
         fc.append(f"[fgs]scale={W}:{fh}[fg]")
         fc.append("[bg][fg]overlay=(W-w)/2:(H-h)/2[lay]")
-    fc.append("[lay]format=yuv420p" + vf_tail + "[vout]")
+    look = ""
+    if story(edl):  # slow push-in (scale grows with t, centre crop back to 1080x1920) + the grade + vignette
+        look = (f"scale=w='2*trunc({W // 2}*(1+{STORY_PUSH}*t/{max(length, 1):.2f}))':h=-2:eval=frame,crop={W}:{H},"
+                + STORY_GRADE[story_tint(edl)] + ",")
+    fc.append(f"[lay]{look}format=yuv420p" + vf_tail + "[vout]")
 
-    music = sorted(p for p in Path(music_dir).glob("*") if p.suffix.lower() in (".mp3", ".wav")) if music_dir and Path(music_dir).exists() else []
+    if story(edl):  # the generated ambient bed (warm / sad by the emotion), faded in and out under the voice
+        music = [ensure_story_bed("warm_ambient" if story_tint(edl) == "warm" else "sad_ambient", music_dir)]
+        gain = STORY_MUSIC_DB
+        fades = f",afade=t=in:d=1.5,afade=t=out:st={max(0.0, length - 2.0):.2f}:d=2"
+    else:
+        music, gain, fades = user_music(music_dir) if music_dir else [], edl.get("bg_music", {}).get("gain_db", -22.0), ""
     use_music = edl.get("bg_music", {}).get("enabled") and music
     fc.append(f"{a}aformat=sample_rates=48000:channel_layouts=stereo[a48]")
     pitch, a = pitch_graph("[a48]", edl, segs)
@@ -313,7 +424,7 @@ def build_command(src, edl, out, info, encoder=None, facecam=None, music_dir=MUS
         k += 1
     if use_music:
         inputs += ["-stream_loop", "-1", "-i", str(music[0])]
-        fc.append(f"[{k}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={edl['bg_music']['gain_db']:.1f}dB[mu]")
+        fc.append(f"[{k}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={gain:.1f}dB{fades}[mu]")
         fc.append("[mu][side]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350[duck]")
         mix.append("[duck]")
     tail = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]"
@@ -341,7 +452,10 @@ def render(src, edl, words, out, workdir, encoder=None, facecam=None, out_words=
     if p.returncode != 0:
         raise RuntimeError("ffmpeg render failed:\n" + p.stderr.strip()[-1500:])
     if base != out:
-        y = CAPTION_Y["split_stack" if edl.get("layout") == "split_stack" and facecam else "blur_fill"]
-        burn_captions(base, out, doc, workdir, y, CAPTION_COLORS.get(edl.get("caption_tone")))
+        if story(edl):  # calm captions: no theme colour, no hype tags / pops
+            burn_captions(base, out, doc, workdir, CAPTION_Y["story"], None, "story")
+        else:
+            y = CAPTION_Y["split_stack" if edl.get("layout") == "split_stack" and facecam else "blur_fill"]
+            burn_captions(base, out, doc, workdir, y, CAPTION_COLORS.get(edl.get("caption_tone")))
         base.unlink()
     return out

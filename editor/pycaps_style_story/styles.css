@@ -1,0 +1,21 @@
+/* emotional_story captions: understated. Archivo Black ships with pycaps (preset "default"); pycaps scales CSS px by
+   ~3 on a 1920-tall short, so 15px = ~45 px letters. Soft = a thin, half-transparent outline + a small offset shadow
+   (html2pic clips blurred shadows into a dark band). Words already said stay white, the rest soft grey. */
+@font-face {
+    font-family: 'Archivo Black';
+    src: url('black.ttf') format('truetype');
+}
+
+.word {
+    font-family: 'Archivo Black';
+    font-size: 15px;
+    color: #D9D9D9;
+    padding: 1px 3px;
+    text-shadow:
+        -0.6px -0.6px 0 rgba(0,0,0,0.55), 0.6px -0.6px 0 rgba(0,0,0,0.55), -0.6px 0.6px 0 rgba(0,0,0,0.55),
+        0.6px 0.6px 0 rgba(0,0,0,0.55), 1px 1.5px 0 rgba(0,0,0,0.45);
+}
+
+.word-being-narrated, .word-already-narrated {
+    color: #FFFFFF;
+}

@@ -292,7 +292,8 @@ def final_score(cue, signal, visual, llm=None):
 
 def apply_verdict(c, v):
     """Copy one ollama_judge() verdict onto a candidate (the YouTube and Twitch paths share this)."""
-    c.update(llm=v["llm"], setup=v["setup"], judge_reject=v["reject"], judge_reason=v["reason"], pillars=v["pillars"])
+    c.update(llm=v["llm"], setup=v["setup"], judge_reject=v["reject"], judge_reason=v["reason"], pillars=v["pillars"],
+             tone=v.get("tone"), emotion=v.get("emotion"), resonance=v.get("resonance"))
     c["reason"] += f" + LLM {v['llm'] * 10:.1f}/10" + (" (rejected)" if v["reject"] else "")
 
 
@@ -340,7 +341,10 @@ def streamer_boost(c, login):
 
 def passes_gate(c, min_score):
     """Banger gate: never a clip the judge hard-rejected (out of context / no payoff), and the judge's weighted
-    rating (0..10) must reach min_score. Unjudged clips (Ollama off) pass."""
+    rating (0..10) must reach min_score. Unjudged clips (Ollama off) pass. An emotional_story (ollama_tone: strength
+    >= EMOTION_PASS) passes whatever its comedy score: the comedy pillars can't score a heartfelt moment."""
+    if c.get("tone") == "emotional_story":
+        return True
     return not c.get("judge_reject") and (c.get("llm") is None or c["llm"] * 10 >= min_score)
 
 
@@ -565,6 +569,41 @@ def _verdict(e):
             "reason": str(e.get("reason") or "").strip()[:200], "setup": None}
 
 
+# Tone: its OWN short call. Asked inside JUDGE_PROMPT the 3B called every clip hype_chaos, the emotional reference
+# Short too; this few-shot call caught it (wholesome 8) but also put 7 of the 24 rated comedy clips at >= 7, 1 at 8
+# (2026-11-16). Hence strength >= EMOTION_PASS before a clip counts as an emotional_story at all. Any feeling counts.
+TONE_PROMPT = """Is this clip mainly EMOTIONAL or mainly FUNNY / HYPE? Read the transcript.
+EMOTIONAL means a real feeling carries it: sad, heartfelt, wholesome, nostalgic, bittersweet, reflective, vulnerable,
+grateful, proud, inspiring, a reunion, a confession, happy tears, someone talking about their past or future self.
+FUNNY / HYPE means jokes, roasts, yelling, gameplay, reactions, banter, chaos: most streamer clips.
+Examples:
+- "I just want to say thank you, chat. Two years ago I was streaming to nobody, and now... I can't believe this" -> emotional, grateful, 8
+- "my dad passed last year and this was his favourite game, so this one is for him" -> emotional, sad, 9
+- "bro you look like a thumb with a wig, chat look at him LMAO" -> funny, none, 0
+- "WHAT IS THAT? AHHH! I'm leaving, nope nope nope" -> funny, none, 0
+- "okay chat we're heading to the bank, grab the car, let's go" -> funny, none, 0
+Reply with JSON only: {"tone": "emotional" or "funny", "emotion": "one word or none", "strength": 0-10}
+
+Transcript: """
+EMOTION_PASS = 8  # strength (0-10) an emotional clip needs to be an emotional_story: edited calm, and it passes the
+#                   banger gate whatever its comedy score (it is not trying to be funny)
+
+
+def ollama_tone(c, model, url="http://localhost:11434", timeout=OLLAMA_TIMEOUT):
+    """-> {"tone": "emotional_story" | "hype_chaos", "emotion": word | None, "resonance": 0-10}. hype_chaos (today's
+    edit) whenever the answer is missing, unsure or weaker than EMOTION_PASS."""
+    try:
+        d = ollama_generate(TONE_PROMPT + c["transcript"][:1500], model, url, timeout)
+        s = d.get("strength")
+        s = int(min(10, max(0, round(float(s))))) if isinstance(s, (int, float)) and not isinstance(s, bool) else 0
+        story = str(d.get("tone") or "").strip().lower().startswith("emo") and s >= EMOTION_PASS
+        emotion = re.sub(r"[^a-z -]", "", str(d.get("emotion") or "").lower()).strip()[:24]
+        return {"tone": "emotional_story" if story else "hype_chaos", "emotion": emotion if story and emotion != "none" else None,
+                "resonance": s if story else 0}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"tone": "hype_chaos", "emotion": None, "resonance": 0}
+
+
 def ollama_judge(cands, model, url="http://localhost:11434", timeout=OLLAMA_TIMEOUT):
     """4-pillar verdict per candidate -> {index: {"llm": 0..1 weighted score, "reject": bool, "reason": str,
     "pillars": {...}, "setup": index | None}}, or None when Ollama is offline / nothing usable came back.
@@ -590,7 +629,7 @@ def ollama_judge(cands, model, url="http://localhost:11434", timeout=OLLAMA_TIME
         entries = data.get("clips") if isinstance(data, dict) else None
         v = _verdict(entries[0] if isinstance(entries, list) and entries else data)  # tolerate a missing wrapper
         if v:
-            out[i] = v
+            out[i] = dict(v, **ollama_tone(c, model, url, timeout))
     if len(cands) > 1 and out:
         for later, setup in ollama_callbacks(cands, model, url, timeout).items():
             if later in out:

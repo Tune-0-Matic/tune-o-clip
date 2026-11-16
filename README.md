@@ -207,6 +207,13 @@ python backend/clipper.py URL --auto-edit                    # single runs too
      cue. Word times = Whisper on each render's own cut audio (`renderer.cut_audio`), so captions match the cuts;
      none when the source has its own captions. Browser-free renderer (html2pic), no AI service. Its encode is
      libx264 veryfast crf 21. SETTINGS caption theme = one active-word colour.
+   - `emotional_story` profile (the judge's own short tone call, `scorer.ollama_tone`: any strong feeling, sad,
+     nostalgic, wholesome, grateful, proud, inspiring..., strength >= 8; such clips pass Min Comedy Score on that
+     alone): no snap zooms / shakes / pitch drop / whoosh / thud / speed-up / teaser, cuts padded 0.15 s and joined
+     with 0.3 s crossfades, a cool (sad family) or warm (wholesome family) grade with `eq=saturation=0.78:contrast=1.06`
+     + vignette, a slow 1.0 -> 1.07x push-in, a generated ambient piano / pad loop (`assets/music/sad_ambient.wav` or
+     `warm_ambient.wav`, your own file of that name wins) at -25 dB with fades + ducking, and calm sentence-case
+     captions (`editor/pycaps_style_story/`) in the lower third. The hype_chaos edit is unchanged.
 5. **QC** (`qc.py`): > 500 KB, 1080x1920, 7.0-58.5 s, mean volume -20..-10 dBFS, no black > 0.3 s. On failure the
    EDL is repaired (black spans stripped, teaser dropped / front trimmed when too long) and re-rendered, up to 2 times.
 

@@ -161,7 +161,8 @@ judge_in = [{"signal": 0.9, "visual": 0.1, "vocal": 0.2, "transcript": "so yeah 
 scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5  # the dead-air floor as the Weight Tuner can set it (default 0, 0 = off)
 verdict = scorer.ollama_judge(judge_in, "m")
 judge_calls = [b for b in sent if b["prompt"].startswith(scorer.JUDGE_PROMPT)]
-assert len(judge_calls) == 4 and len(sent) == 5, len(sent)  # one call per clip + one callback call
+tone_calls = [b for b in sent if b["prompt"].startswith(scorer.TONE_PROMPT)]
+assert len(judge_calls) == 4 and len(tone_calls) == 3 and len(sent) == 8, len(sent)  # per clip + a tone call per judged clip + callbacks
 assert all(b["format"] == "json" and b["stream"] is False for b in sent)
 for b, c in zip(judge_calls, judge_in):  # each call sees exactly its own clip: nothing to copy from
     items = json.loads(b["prompt"].split("Candidates:", 1)[1])
@@ -214,6 +215,20 @@ g = dict(cue=0, signal=0.5, visual=0, start_sec=0, end_sec=45, reason="Twitch cl
 scorer.apply_verdict(g, gameplay)
 assert scorer.passes_gate(g, 3.0) and not scorer.passes_gate(g, 5.0) and "(rejected)" not in g["reason"], g
 scorer.MIN_PAYOFF, scorer.MIN_HOOK = 5, 5
+# tone: its own call; an emotional_story needs strength >= EMOTION_PASS, then passes the gate on that alone
+assert all(v["tone"] == "hype_chaos" and v["resonance"] == 0 for v in verdict.values()), verdict  # no tone keys -> hype
+def tone_reply(reply):
+    urllib.request.urlopen = lambda req, timeout=None: FakeResponse(json.dumps({"response": json.dumps(reply)}).encode())
+    return scorer.ollama_tone({"transcript": "my dad passed last year, this one is for him"}, "m")
+assert tone_reply({"tone": "emotional", "emotion": "Sad!", "strength": 9}) == {"tone": "emotional_story", "emotion": "sad", "resonance": 9}
+assert tone_reply({"tone": "emotional", "emotion": "confused", "strength": 7})["tone"] == "hype_chaos", "7: the 3B's false-positive zone"
+assert tone_reply({"tone": "funny", "emotion": "none", "strength": 9})["tone"] == "hype_chaos"
+assert tone_reply({"tone": "emotional", "strength": "high"})["tone"] == "hype_chaos" and tone_reply("garbage")["tone"] == "hype_chaos"
+story = dict(g, llm=0.21, tone="emotional_story", emotion="nostalgic", resonance=8)
+assert scorer.passes_gate(story, 6.0) and not scorer.passes_gate(dict(story, tone="hype_chaos"), 6.0), "moving, not funny: still passes"
+c_tone = {"cue": 0, "signal": 0.5, "visual": 0, "start_sec": 0, "end_sec": 30, "reason": "x"}
+scorer.apply_verdict(c_tone, dict(gameplay, tone="emotional_story", emotion="proud", resonance=9))
+assert (c_tone["tone"], c_tone["emotion"], c_tone["resonance"]) == ("emotional_story", "proud", 9)
 urllib.request.urlopen = real_urlopen
 
 # viral boost: a proven Twitch banger (>= 3000 views + a vocal burst) gets half a point; a quiet or small one doesn't

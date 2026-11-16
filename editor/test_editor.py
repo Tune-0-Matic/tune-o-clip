@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -457,6 +458,69 @@ two = {"cuts": [{"start": 0, "end": 2}, {"start": 5, "end": 7}], "hook_teaser": 
 src_words = [{"word": "hey", "start": 0.5, "end": 0.8}, {"word": "NO", "start": 5.5, "end": 5.8}]
 doc = renderer.caption_doc(two, src_words, out_words=[{"word": "hey", "start": 0.52, "end": 0.8}, {"word": "no", "start": 2.51, "end": 2.8}])
 assert [sg["start"] for sg in doc["segments"]] == [0.52, 2.51], doc
+
+# --- emotional_story profile: calm edit; the hype_chaos edit stays exactly as it was ------------------------------
+hype = director.direct(roast_w, roast_a, dur, framing=CAM)
+story_edl = director.direct(roast_w, roast_a, dur, framing=CAM, meta={"tone": "emotional_story", "emotion": "nostalgic"})
+assert hype.get("profile") is None and hype["zooms"] and hype["sfx"] and hype.get("pitch"), "hype untouched"
+assert story_edl["profile"] == "emotional_story" and story_edl["emotion"] == "nostalgic"
+assert story_edl["zooms"] == [] and story_edl["shakes"] == [] and story_edl["sfx"] == [] and "pitch" not in story_edl
+assert story_edl["speed"] == [] and not story_edl["hook_teaser"]["enabled"] and story_edl["bg_music"]["enabled"]
+padded = [(c["start"], c["end"]) for c in story_edl["cuts"]]
+assert all(b - a > 0.05 for (_, a), (b, _) in zip(padded, padded[1:])), "padded cuts that touch are merged"
+assert all(any(ps <= c["start"] and c["end"] <= pe for ps, pe in padded) for c in hype["cuts"]), "every hype cut kept, with more air"
+assert director.direct(roast_w, roast_a, dur, meta={"tone": "hype_chaos"}).get("profile") is None
+# crossfades: the timeline is XFADE shorter per join; a piece too short to give up head + tail gets a shorter fade
+xf_edl = {"profile": "emotional_story", "cuts": [{"start": 0, "end": 4}, {"start": 6, "end": 10}, {"start": 12, "end": 15}],
+          "hook_teaser": {"enabled": False}}
+segs_xf, len_xf = renderer.timeline(xf_edl)
+assert abs(len_xf - (11 - 2 * renderer.XFADE)) < 1e-9 and [round(o, 3) for _, _, o, _, _ in segs_xf] == [0.0, 3.7, 7.4], segs_xf
+assert renderer.timeline(dict(xf_edl, profile=None))[1] == 11, "hype: plain concat, no overlap"
+assert renderer.xfade_len(xf_edl, [(0, 0.5, 1), (1, 3, 1)]) == 0.2 and renderer.xfade_len(xf_edl, [(0, 4, 1)]) == 0.0
+xg = ";".join(renderer.cut_graph(segs_xf, 0.3))
+assert "[v0][v1]xfade=transition=fade:duration=0.300:offset=3.700[vx1]" in xg and "[vx1][v2]xfade=transition=fade:duration=0.300:offset=7.400[vc]" in xg
+assert "[ax1][a2]acrossfade=d=0.300[ac]" in xg and "concat=" not in xg and ",fps=30,settb=AVTB[v0]" in xg, xg
+# calm captions: sentence case, up to 5 words a line
+sdoc = renderer.caption_doc(dict(xf_edl, profile="emotional_story"), words_at([("Hey", 1.0), ("chat,", 1.3), ("you", 1.6), ("ready", 1.9), ("to", 2.2), ("go?", 2.5)], 0.25))
+assert [w["word"] for w in sdoc["segments"][0]["words"]] == ["Hey", "chat,", "you", "ready", "to"], sdoc
+assert renderer.caption_doc(dict(xf_edl, profile=None), words_at([("Hey", 1.0)]))["segments"][0]["words"][0]["word"] == "HEY"
+# the graph: grade + push-in + xfade + the ambient bed at -25 dB with fades + ducking; no hype effects at all
+music_tmp = tmp / "music"
+bed = renderer.ensure_story_bed("sad_ambient", music_tmp)
+with wave.open(str(bed)) as f:
+    assert f.getframerate() == 48000 and abs(f.getnframes() / 48000 - 16.0) < 0.01
+assert renderer.user_music(music_tmp) == [], "the story beds never become the hype edit's music"
+(music_tmp / "mine.mp3").write_bytes(b"x")
+assert [m.name for m in renderer.user_music(music_tmp)] == ["mine.mp3"]
+(music_tmp / "mine.mp3").unlink()
+story_real = dict(real, profile="emotional_story", emotion="nostalgic", layout="blur_fill", zooms=[], shakes=[], sfx=[], speed=[],
+                  hook_teaser={"enabled": False}, bg_music={"enabled": True, "gain_db": -22})
+story_real.pop("pitch")
+sc = renderer.build_command(src, story_real, tmp / "story.mp4", renderer.probe(src), music_dir=music_tmp)
+sg = sc[sc.index("-filter_complex") + 1]
+for needle in ("xfade=transition=fade", "acrossfade=d=", "eq=saturation=0.78:contrast=1.06", "colorbalance=rs=-0.04", "vignette=PI/5",
+               "scale=w='2*trunc(540*(1+0.07*t/", ":eval=frame,crop=1080:1920", "volume=-25.0dB,afade=t=in:d=1.5,afade=t=out:st=",
+               "sidechaincompress"):
+    assert needle in sg, needle
+for needle in ("zoompan", "asetrate", "adelay", "crop=w=iw-12"):
+    assert needle not in sg, needle  # zero snap zooms / pitch drops / SFX / shakes
+assert str(bed) in sc, "the generated sad bed"
+warm = renderer.build_command(src, dict(story_real, emotion="proud"), tmp / "w.mp4", renderer.probe(src), music_dir=music_tmp)
+wg = warm[warm.index("-filter_complex") + 1]
+assert "eq=saturation=0.85" in wg and "colorbalance=rs=0.05" in wg and str(music_tmp / "warm_ambient.wav") in warm, "proud: warm grade + major bed"
+hype_graph = renderer.build_command(src, real, tmp / "x.mp4", renderer.probe(src), facecam=cam)
+hg = hype_graph[hype_graph.index("-filter_complex") + 1]
+assert "xfade" not in hg and "eq=saturation" not in hg and "eval=frame" not in hg and "concat=n=" in hg, "hype graph unchanged"
+# for real: ffmpeg runs the xfade chain, the length matches the timeline, and pycaps burns the calm style
+with quiet():
+    final_s, rep_s = pipeline.render_until_pass(src, story_real, spoken, tmp / "story_work", {"max_dur": 30.0, "min_dur": 5.0},
+                                                renderer.detect_encoder())
+assert rep_s["ok"] and abs(rep_s["duration"] - renderer.timeline(final_s)[1]) < 0.2, (rep_s, renderer.timeline(final_s)[1])
+story_cmd = [str(x) for x in json.loads((tmp / "story_work" / "ffmpeg_cmd.json").read_text())]
+assert any("xfade" in x for x in story_cmd)
+assert json.loads((tmp / "story_work" / "captions.json").read_text())["segments"][0]["words"][0]["word"] == "this", "sentence case burned"
+cut_s = renderer.cut_audio(src, story_real, tmp / "story_cut.wav")
+assert abs(len(pipeline.clipper.decode_audio(cut_s)) / 16000 - renderer.timeline(story_real)[1]) < 0.2, "Whisper hears the crossfaded cut"
 
 # editor defaults read from settings.json
 (tmp / "settings.json").write_text(json.dumps({"caption_theme": "Cyan", "music_gain_db": -24, "facecam_box": "auto"}))

@@ -270,15 +270,17 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     online = bool(model) and scorer.ollama_online()
     model = scorer.resolve_model(model) if online else model
     meta = dict(manifest.get("twitch") or {"title": manifest.get("title")},  # + the judge's read, for the director
-                pillars=clip.get("pillars"), judge_reason=clip.get("judge_reason"))
-    music = renderer.MUSIC_DIR.exists() and any(p.suffix.lower() in (".mp3", ".wav") for p in renderer.MUSIC_DIR.iterdir())
+                pillars=clip.get("pillars"), judge_reason=clip.get("judge_reason"), tone=clip.get("tone"), emotion=clip.get("emotion"))
+    music = bool(renderer.user_music())
     emit("stage", stage="edit", msg="Directing" + (f" with {model}" if online else " (heuristic, Ollama offline)"))
     edl = director.direct(words, audio, duration, model=model if online else None, meta=meta,
                           framing=fr, music=music)
     if caption_tone:  # SETTINGS caption theme: one active-word colour instead of yellow + hype red
         edl["caption_tone"] = caption_tone
-    if music_gain_db is not None:
+    if music_gain_db is not None and edl.get("profile") != "emotional_story":  # the story bed keeps its own level
         edl["bg_music"]["gain_db"] = float(music_gain_db)
+    if edl.get("profile") == "emotional_story":
+        emit("log", msg=f"Emotional story ({edl.get('emotion') or 'feeling'}): calm edit, no zooms / SFX, ambient bed")
     del audio
     if edl.get("skip_render"):  # nothing coherent left to post: don't spend a render on it
         emit("log", msg=f"Skipped {stem}: {edl['skip_reason']}")
