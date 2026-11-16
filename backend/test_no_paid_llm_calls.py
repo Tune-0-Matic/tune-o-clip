@@ -17,7 +17,7 @@ PAID = re.compile(r"\b(anthropic|openai|cohere|mistralai|google\.generativeai|go
 # every web host the runtime may talk to: local Ollama, the platforms it clips from / posts to, RunPod, installers
 HOSTS = {"127.0.0.1", "localhost", "www.youtube.com", "youtube.com", "www.googleapis.com", "oauth2.googleapis.com",
          "accounts.google.com", "api.twitch.tv", "id.twitch.tv", "gql.twitch.tv", "www.twitch.tv", "dev.twitch.tv", "clips.twitch.tv",
-         "open.tiktokapis.com", "www.tiktok.com", "rest.runpod.io", "api.runpod.io", "ollama.com", "github.com", "www.w3.org",
+         "open.tiktokapis.com", "www.tiktok.com", "api.runpod.io", "ollama.com", "github.com", "www.w3.org",
          "discord.com", "discordapp.com", "youtu.be", "open-upload.tiktokapis.com"}
 URL = re.compile(r"https?://([A-Za-z0-9.-]+)")
 

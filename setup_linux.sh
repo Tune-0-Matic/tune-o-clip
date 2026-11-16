@@ -52,7 +52,7 @@ swapon --show
 say "System packages"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip ffmpeg curl git ca-certificates \
-  unzip fonts-dejavu-core fonts-liberation fontconfig mesa-va-drivers vainfo
+  unzip fonts-dejavu-core fonts-liberation fontconfig mesa-va-drivers vainfo libegl1
 # Caption font: pycaps ships Komika Axis inside its package (editor/captions.py), no system fonts needed.
 
 # --- 3. Ollama: one model at a time, kept warm 5 min ----------------------------------------------------------------

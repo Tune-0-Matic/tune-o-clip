@@ -68,54 +68,42 @@ CATALOG = {
 
 
 class FakeRunPod:
-    """A tiny RunPod: REST v1 pods (POST / GET / DELETE), the v2 GPU catalog and GraphQL myself. A create for a GPU in
-    `full` (as (gpu, cloud)) answers 403 with an empty body, like the real API with no capacity."""
+    """A tiny RunPod: REST v2 pods (POST / GET / DELETE), the v2 GPU catalog and GraphQL myself. A create for a GPU in
+    `full` (as (gpu, cloud)) answers 400 with a human-readable detail, like v2 with no capacity."""
 
-    def __init__(self, ready_after=1, full=(), gql_refuse=None, gql_unknown=()):
+    NO_CAP = "There are no instances currently available with the requested specifications."
+
+    def __init__(self, ready_after=1, full=()):
         self.calls, self.pods, self.ready_after, self.gets, self.full = [], {}, ready_after, 0, set(full)
-        self.gql_refuse = gql_refuse or {}  # (gpu, cloud) -> the error message GraphQL gives
-        self.gql_unknown = set(gql_unknown)  # input fields this fake's GraphQL schema "doesn't define"
-        self.gql_inputs = []
 
     def __call__(self, req, timeout=None):
         body = json.loads(req.data) if req.data else None
         assert req.headers["Authorization"] == "Bearer KEY123" and req.get_header("User-agent") == "tune-o-clip/1.0"
         self.calls.append((req.get_method(), req.full_url.replace(rp.API, ""), body))
         method, path = req.get_method(), req.full_url.replace(rp.API, "")
-        if path.startswith("https://api.runpod.io/v2/catalog/gpus"):
+        if req.full_url.startswith("https://api.runpod.io/v2/catalog/gpus"):
             cloud = path.split("cloud=")[1]
             return Resp(200, json.dumps({"gpus": CATALOG[cloud]}).encode())
-        if path == rp.GRAPHQL and "podFindAndDeployOnDemand" in body["query"]:
-            q = body["query"]
-            self.gql_inputs.append(q)
-            for f in self.gql_unknown:
-                if f + ":" in q:
-                    return Resp(400, json.dumps({"errors": [{"message": f'Field "{f}" is not defined by type "PodFindAndDeployOnDemandInput".'}]}).encode())
-            gpu = q.split('gpuTypeId: "')[1].split('"')[0]
-            cloud = q.split("cloudType: ")[1].split(",")[0]
-            if (gpu, cloud) in self.gql_refuse:
-                return Resp(200, json.dumps({"errors": [{"message": self.gql_refuse[(gpu, cloud)]}], "data": None}).encode())
-            self.pods["gq1"] = {"id": "gq1", "name": "tune-o-clip", "desiredStatus": "RUNNING", "publicIp": None, "portMappings": None}
-            return Resp(200, json.dumps({"data": {"podFindAndDeployOnDemand": {"id": "gq1", "imageName": "x", "machineId": "m"}}}).encode())
         if path == rp.GRAPHQL:
             return Resp(200, json.dumps({"data": {"myself": {"clientBalance": 9.73, "currentSpendPerHr": 0, "spendLimit": 80}}}).encode())
-        if method == "POST" and path == "/pods" and body.get("gpuCount") == 0:
-            raise urllib.error.HTTPError(req.full_url, 400, "Bad", {}, io.BytesIO(b'[{"error":"schema","problems":["gpuCount minimum"]}]'))
-        if method == "POST" and path == "/pods" and (body["gpuTypeIds"][0], body["cloudType"]) in self.full:
-            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {"x-request-id": "req_test"}, io.BytesIO(b""))
         if method == "POST" and path == "/pods":
-            self.pods["pod1"] = {"id": "pod1", "name": body["name"], "desiredStatus": "RUNNING", "costPerHr": 0.28,
-                                 "publicIp": None, "portMappings": None}
+            assert set(body) <= {"name", "image", "gpu", "cloud", "disk", "ports", "env"}, f"v2 rejects unknown fields: {sorted(body)}"
+            if body["gpu"]["count"] == 0:
+                raise urllib.error.HTTPError(req.full_url, 422, "Unprocessable", {}, io.BytesIO(
+                    b'{"detail":"Request validation failed.","errors":["$.gpu.count: minimum: got 0, want 1"],"status":422}'))
+            if (body["gpu"]["id"], body["cloud"]) in self.full:
+                raise urllib.error.HTTPError(req.full_url, 400, "Bad", {}, io.BytesIO(json.dumps({"detail": self.NO_CAP, "status": 400}).encode()))
+            self.pods["pod1"] = {"id": "pod1", "name": body["name"], "status": "PROVISIONING", "cost": 0.28, "ssh": None}
             return Resp(201, json.dumps(self.pods["pod1"]).encode())
         if method == "GET" and path == "/pods":
-            return Resp(200, json.dumps(list(self.pods.values())).encode())
+            return Resp(200, json.dumps({"pods": list(self.pods.values()), "pagination": {"hasNextPage": False, "nextCursor": None}}).encode())
         pid = path.rsplit("/", 1)[1]
         if method == "GET":
             if pid not in self.pods:
                 raise urllib.error.HTTPError(req.full_url, 404, "Pod not found.", {}, io.BytesIO(b"not found"))
             self.gets += 1
             if self.gets > self.ready_after:
-                self.pods[pid].update(publicIp="203.0.113.7", portMappings={"22": 10341})
+                self.pods[pid].update(status="RUNNING", ssh={"direct": {"host": "203.0.113.7", "port": 10341, "username": "root"}})
             return Resp(200, json.dumps(self.pods[pid]).encode())
         if method == "DELETE":
             self.pods.pop(pid, None)
@@ -137,10 +125,10 @@ posts = [c for c in fake.calls if c[:2] == ("POST", "/pods")]
 assert len(posts) == 1, posts
 body = posts[0][2]
 # the default GPU (RTX 4000 Ada) has capacity in Secure: that's the first try, one type per attempt
-assert body["gpuTypeIds"] == ["NVIDIA RTX 4000 Ada Generation"] and body["cloudType"] == "SECURE" and body["gpuCount"] == 1
-assert body["volumeInGb"] == 0 and body["containerDiskInGb"] == 25 and body["ports"] == ["22/tcp"] and body["supportPublicIp"] is True
+assert body["gpu"] == {"id": "NVIDIA RTX 4000 Ada Generation", "count": 1} and body["cloud"] == "SECURE"
+assert "mounts" not in body and body["disk"] == 25 and body["ports"] == ["22/tcp"]
 assert body["env"]["PUBLIC_KEY"].startswith("ssh-ed25519") and body["env"]["TOC_CLOUD"] == "1" and body["env"]["TOC_RUNPOD_KEY"] == "KEY123"
-assert body["imageName"] == rp.IMAGE and "ubuntu2404" in rp.IMAGE
+assert body["image"] == rp.IMAGE and "ubuntu2404" in rp.IMAGE
 assert done == ["ssh", "upload", "boot"] and state["ready"] and state["ip"] == "203.0.113.7" and state["port"] == 10341
 saved = json.loads(state_path.read_text())
 assert saved["pod_id"] == "pod1" and saved["cost_per_hr"] == 0.28 and saved["ready"], saved
@@ -167,39 +155,48 @@ try:
     raise AssertionError("an 8 GB choice must be refused")
 except rp.RunPodError as e:
     assert "need 16 GB" in str(e)
-assert rp.pod_body("k", "x", "NVIDIA GeForce RTX 4090")["gpuTypeIds"] == ["NVIDIA GeForce RTX 4090"] + rp.GPU_IDS[:2]
+assert rp.pod_body("k", "x", "NVIDIA GeForce RTX 4090")["gpu"] == {"id": "NVIDIA GeForce RTX 4090", "count": 1}
+assert rp.pod_body("k", "x")["gpu"]["id"] == rp.GPU_IDS[0]
 
-# the drawer's A40: REST 403 (empty body) -> GraphQL, whose own message is printed verbatim; then the fallback,
-# whose REST 403 is answered by GraphQL deploying it
-A40_MSG = "There are no longer any instances available with the requested specifications. Please refresh and try again."
+# the drawer's A40: v2 400 (no capacity, detail printed verbatim) -> the next placement deploys
 every = {(g["id"], c) for c in rp.CLOUDS for g in CATALOG[c]}
-fake_gq = FakeRunPod(full=every, gql_refuse={("NVIDIA A40", "SECURE"): A40_MSG})
+fake_a40 = FakeRunPod(full={("NVIDIA A40", "SECURE")})
 with quiet() as out:
-    st = rp.start_cloud_pod(rp.RunPod("KEY123", opener=fake_gq), "KEY123", "NVIDIA A40", tmp / "gq_state.json", ctype="ALL",
+    st = rp.start_cloud_pod(rp.RunPod("KEY123", opener=fake_a40), "KEY123", "NVIDIA A40", tmp / "a40_state.json", ctype="ALL",
                             ssh_ready=lambda s: None, do_upload=lambda s: None, do_bootstrap=lambda s: None, sleep=lambda s: None)
-rest_posts = [c[2] for c in fake_gq.calls if c[:2] == ("POST", "/pods")]
-assert rest_posts[0]["gpuTypeIds"] == ["NVIDIA A40"] and rest_posts[0]["cloudType"] == "SECURE", "the selection goes first"
+rest_posts = [c[2] for c in fake_a40.calls if c[:2] == ("POST", "/pods")]
+assert rest_posts[0]["gpu"]["id"] == "NVIDIA A40" and rest_posts[0]["cloud"] == "SECURE", "the selection goes first"
 log = out.getvalue()
-assert f"GraphQL: {A40_MSG}" in log and "REST HTTP 403 (empty body, request id req_test)" in log and "[your choice]" in log, log
-assert "no capacity" not in log.lower().replace("no longer any instances", ""), "no guessed 'no capacity' label"
-assert st["pod_id"] == "gq1" and st["gpu"] != "NVIDIA A40" and st["cost_per_hr"] <= 0.50, st  # deployed via GraphQL
-assert 'gpuTypeId: "NVIDIA A40"' in fake_gq.gql_inputs[0] and "cloudType: SECURE" in fake_gq.gql_inputs[0] and "volumeInGb: 0" in fake_gq.gql_inputs[0]
-assert 'env: [{key: "PUBLIC_KEY"' in fake_gq.gql_inputs[0], fake_gq.gql_inputs[0][:300]
-# a field GraphQL doesn't define is dropped and the deploy retried once
-fake_uk = FakeRunPod(gql_unknown={"supportPublicIp"})
-api_uk = rp.RunPod("KEY123", opener=fake_uk)
-pod = api_uk.deploy_graphql(rp.pod_body("ssh-ed25519 X", "K", cloud="COMMUNITY", gpus=["NVIDIA RTX 4000 Ada Generation"]))
-assert pod["id"] == "gq1" and len(fake_uk.gql_inputs) == 2 and "supportPublicIp" not in fake_uk.gql_inputs[1]
+assert f"HTTP 400: {FakeRunPod.NO_CAP}" in log and "[your choice]" in log, log
+assert st["pod_id"] == "pod1" and st["gpu"] != "NVIDIA A40" and st["cost_per_hr"] == 0.28, st
 # everything refused: one error listing every reason, nothing created or saved
-fake_none = FakeRunPod(full=every, gql_refuse={k: "Something went wrong. Please try again later or contact support." for k in every})
+fake_none = FakeRunPod(full=every)
 with quiet() as out:
     try:
         rp.start_cloud_pod(rp.RunPod("KEY123", opener=fake_none), "KEY123", None, tmp / "none_state.json", ssh_ready=None,
                            do_upload=None, do_bootstrap=None, sleep=lambda s: None)
         raise AssertionError("should raise")
     except rp.NoCapacity as e:
-        assert "refused every option" in str(e) and "GraphQL: Something went wrong" in str(e) and "Test Deploy" in str(e), str(e)
+        assert "refused every option" in str(e) and FakeRunPod.NO_CAP in str(e) and "Test Deploy" in str(e), str(e)
 assert not fake_none.pods and not (tmp / "none_state.json").exists(), "nothing created, nothing saved"
+# 402 (no balance) stops at once: no other GPU is tried
+class Broke(FakeRunPod):
+    def __call__(self, req, timeout=None):
+        if req.get_method() == "POST" and req.full_url.endswith("/pods"):
+            self.calls.append(("POST", "/pods", json.loads(req.data)))
+            raise urllib.error.HTTPError(req.full_url, 402, "x", {}, io.BytesIO(b'{"detail":"Insufficient balance.","status":402}'))
+        return super().__call__(req, timeout)
+broke = Broke()
+with quiet():
+    try:
+        rp.start_cloud_pod(rp.RunPod("KEY123", opener=broke), "KEY123", None, tmp / "broke.json", ssh_ready=None,
+                           do_upload=None, do_bootstrap=None, sleep=lambda s: None)
+        raise AssertionError("should raise")
+    except rp.NoCapacity:
+        raise AssertionError("402 is not a capacity problem")
+    except rp.RunPodError as e:
+        assert "HTTP 402" in str(e) and "Insufficient balance" in str(e), str(e)
+assert sum(c[:2] == ("POST", "/pods") for c in broke.calls) == 1, "402: no further GPUs tried"
 # main(): `on --gpu X --cloud Y` reaches start_cloud_pod as the first choice (no race with the .env write)
 got = {}
 real_start = rp.start_cloud_pod
@@ -218,10 +215,10 @@ os.environ["RUNPOD_API_KEY"] = ""
 # diagnose: no Pod is ever created (only the schema-rejected gpuCount 0 probe)
 fake_d = FakeRunPod()
 with quiet() as out:
-    assert rp.diagnose(rp.RunPod("KEY123", opener=fake_d), "NVIDIA A40", "ALL") == 400
+    assert rp.diagnose(rp.RunPod("KEY123", opener=fake_d), "NVIDIA A40", "ALL") == 422
 d = out.getvalue()
 assert "API key (GET /pods): OK" in d and "balance $9.73" in d and "spend limit 80" in d and "NVIDIA A40: secure $0.59/hr NONE" in d, d
-assert "REST create permission: OK" in d and not fake_d.pods and not fake_d.gql_inputs, "diagnose never deploys"
+assert "REST create permission: OK" in d and not fake_d.pods, "diagnose never deploys"
 os.environ["RUNPOD_CLOUD_TYPE"] = "COMMUNITY"
 assert rp.cloud_type() == "COMMUNITY"
 os.environ["RUNPOD_CLOUD_TYPE"] = "bogus"
@@ -260,8 +257,8 @@ assert "terminating the Pod" in out.getvalue()
 # a Pod left from an unfinished start is replaced, not trusted
 rp.save_state({"pod_id": "old", "ready": False, "created": 0}, state_path)
 fake3 = FakeRunPod()
-fake3.pods["old"] = {"id": "old", "name": "tune-o-clip", "desiredStatus": "RUNNING"}
-fake3.pods["mine"] = {"id": "mine", "name": "my-stable-diffusion", "desiredStatus": "RUNNING"}  # not ours: untouched
+fake3.pods["old"] = {"id": "old", "name": "tune-o-clip", "status": "RUNNING"}
+fake3.pods["mine"] = {"id": "mine", "name": "my-stable-diffusion", "status": "RUNNING"}  # not ours: untouched
 with quiet():
     rp.start_cloud_pod(rp.RunPod("KEY123", opener=fake3), "KEY123", None, state_path, ssh_ready=lambda s: None,
                        do_upload=lambda s: None, do_bootstrap=lambda s: None, sleep=lambda s: None)
@@ -270,7 +267,7 @@ assert ("DELETE", "/pods/mine", None) not in fake3.calls and "mine" in fake3.pod
 assert sum(1 for p in fake3.pods.values() if p.get("name") == "tune-o-clip") == 1, "single-Pod lock"
 state_path.unlink()
 # hard limits on every create
-for bad in ({"gpuCount": 2}, {"volumeInGb": 20}, {"containerDiskInGb": 50}):
+for bad in ({"gpu": {"id": "x", "count": 2}}, {"mounts": {"persistent": {"size": 20, "path": "/workspace"}}}, {"disk": 50}):
     try:
         rp.check_body({**rp.pod_body("k", "x"), **bad})
         raise AssertionError(f"should refuse {bad}")
@@ -298,7 +295,7 @@ assert rp.should_terminate(1000 + 2.2 * 3600, 1000, 1000 + 2.2 * 3600, True, 10,
 assert abs(rp.session_usd(3600, 0, 0.28) - 0.28) < 1e-9
 # status(): a gone Pod is forgotten; an idle one is terminated
 fake4 = FakeRunPod()
-fake4.pods["p9"] = {"id": "p9", "name": "tune-o-clip", "desiredStatus": "RUNNING"}
+fake4.pods["p9"] = {"id": "p9", "name": "tune-o-clip", "status": "RUNNING"}
 api4 = rp.RunPod("KEY123", opener=fake4)
 rp.save_state({"pod_id": "p9", "ready": True, "created": 0, "last_activity": 0, "busy": False, "cost_per_hr": 0.28}, state_path)
 with quiet() as out:
@@ -308,7 +305,7 @@ rp.save_state({"pod_id": "ghost", "ready": True, "created": 0}, state_path)
 with quiet() as out:
     assert rp.status(api4, state_path) == {} and "is gone" in out.getvalue() and not state_path.exists()
 # the live meter, and the spend cap from status()
-fake4.pods["p10"] = {"id": "p10", "name": "tune-o-clip", "desiredStatus": "RUNNING"}
+fake4.pods["p10"] = {"id": "p10", "name": "tune-o-clip", "status": "RUNNING"}
 rp.save_state({"pod_id": "p10", "ready": True, "created": 0, "last_activity": 3500, "busy": False, "cost_per_hr": 0.28}, state_path)
 with quiet() as out:
     assert rp.status(api4, state_path, clock=lambda: 3600)["pod_id"] == "p10"
@@ -319,8 +316,8 @@ with quiet() as out:
     assert rp.status(api4, state_path, clock=lambda: 6 * 3600) == {}
 assert "spend cap" in out.getvalue() and "p10" not in fake4.pods and not state_path.exists(), out.getvalue()
 # orphan check (no state on this PC, a tune-o-clip Pod still billing): reported for the red banner, not killed
-fake4.pods["orph"] = {"id": "orph", "name": "tune-o-clip", "desiredStatus": "RUNNING", "costPerHr": 0.28}
-fake4.pods["other"] = {"id": "other", "name": "someone-else", "desiredStatus": "RUNNING", "costPerHr": 1.0}
+fake4.pods["orph"] = {"id": "orph", "name": "tune-o-clip", "status": "RUNNING", "cost": 0.28}
+fake4.pods["other"] = {"id": "other", "name": "someone-else", "status": "RUNNING", "cost": 1.0}
 with quiet() as out:
     assert rp.status(api4, state_path) == {"orphans": ["orph"]}
 ev = json.loads(out.getvalue().strip().splitlines()[-1])
@@ -411,6 +408,7 @@ if shutil.which("bash"):  # the mini PC / the Pod (this Windows box has none on 
             .replace("python3 -u /root/tune-o-clip/backend/clipper.py 'a b'", "sleep 1; test -f busy && test -f act || exit 3; exit 7"))
     assert subprocess.run(["bash", "-c", fake], capture_output=True, timeout=20).returncode == 7, "python's exit code comes back"
     assert not (hb / "busy").exists() and (hb / "act").exists(), "the exit trap clears busy and stamps activity"
+    __import__("time").sleep(0.6)  # a loop pass already asleep (0.2 s) may touch once more as the shell exits
     stamp = (hb / "act").stat().st_mtime
     __import__("time").sleep(1.0)
     assert (hb / "act").stat().st_mtime == stamp, "the heartbeat stopped with its shell"
@@ -504,25 +502,25 @@ class Limited(FakeRunPod):
         return super().__call__(req, timeout)
 naps = []
 lim = Limited(n=3)
-lim.pods["p429"] = {"id": "p429", "name": "tune-o-clip", "desiredStatus": "RUNNING"}
+lim.pods["p429"] = {"id": "p429", "name": "tune-o-clip", "status": "RUNNING"}
 api_l = rp.RunPod("KEY123", opener=lim, sleep=naps.append)
 with quiet() as out:
     api_l.terminate("p429")  # 3x 429, then 204
 assert "p429" not in lim.pods and naps == [5, 10, 20] and out.getvalue().count('"retry"') == 3, (naps, lim.calls[-4:])
 # the start poll rides out 429s instead of declaring the Pod gone
 lim2 = Limited(n=2)
-lim2.pods["px"] = {"id": "px", "name": "tune-o-clip", "desiredStatus": "RUNNING", "publicIp": None, "portMappings": None}
+lim2.pods["px"] = {"id": "px", "name": "tune-o-clip", "status": "RUNNING", "ssh": None}
 with quiet():
     st429 = rp.wait_ready(rp.RunPod("KEY123", opener=lim2, sleep=lambda s: None), {"pod_id": "px"}, sleep=lambda s: None)
 assert st429["ip"] == "203.0.113.7", st429
-# a create is never retried on 5xx (it may already exist); "no instances" moves on to the next placement
+# a create is never retried (a 5xx may come after it was made); v2's 400 "no instances" moves on to the next placement
 class NoInst(FakeRunPod):
     def __call__(self, req, timeout=None):
         if req.get_method() == "POST" and req.full_url.endswith("/pods"):
             self.calls.append(("POST", "/pods", json.loads(req.data)))
-            raise urllib.error.HTTPError(req.full_url, 500, "x", {}, io.BytesIO(b'{"error":"create pod: There are no instances currently available","status":500}'))
+            raise urllib.error.HTTPError(req.full_url, 400, "x", {}, io.BytesIO(b'{"detail":"There are no instances currently available","status":400}'))
         return super().__call__(req, timeout)
-ni = NoInst(gql_refuse={(g["id"], c): "no instances" for c in rp.CLOUDS for g in CATALOG[c]})
+ni = NoInst()
 with quiet() as out:
     try:
         rp.start_cloud_pod(rp.RunPod("KEY123", opener=ni, sleep=lambda s: (_ for _ in ()).throw(AssertionError("a create was retried"))),
@@ -531,7 +529,7 @@ with quiet() as out:
     except rp.NoCapacity as e:
         assert "no instances" in str(e) and "refused every option" in str(e), str(e)
 posts = [c for c in ni.calls if c[:2] == ("POST", "/pods")]
-assert len(posts) == len({(c[2]["gpuTypeIds"][0], c[2]["cloudType"]) for c in posts}) > 1, "one POST per placement, then the next"
+assert len(posts) == len({(c[2]["gpu"]["id"], c[2]["cloud"]) for c in posts}) > 1, "one POST per placement, then the next"
 # persistent errors raise (never "gone"); a real 404 is gone
 always = Limited(n=99)
 try:

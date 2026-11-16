@@ -8,8 +8,9 @@ ARG WHISPER=large-v3-turbo
 ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore \
     OLLAMA_MODELS=/opt/ollama/models HF_HOME=/opt/hf_cache
 
-# zstd: the Ollama installer needs it; pciutils: its GPU detection; openssh-server: RunPod's /start.sh runs sshd
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl zstd pciutils openssh-server \
+# zstd: the Ollama installer needs it; pciutils: its GPU detection; openssh-server: RunPod's /start.sh runs sshd;
+# libegl1: skia-python (pycaps' caption renderer) fails to import without libEGL.so.1 (live 2026-11-16)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl zstd pciutils openssh-server libegl1 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://ollama.com/install.sh | sh
 

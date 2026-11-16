@@ -16,9 +16,10 @@ the cloud profile (Whisper large-v3-turbo + qwen2.5:14b-instruct + NVENC), termi
   python backend/runpod_manager.py watchdog      (on the Pod) terminate itself when idle / past the safety cap
 
 Prints JSON lines like the other backend tools ({"event": "runpod", "stage": ..., "msg": ...}).
-API: Pods REST v1 (https://rest.runpod.io/v1, Bearer key): POST /pods, GET /pods/{id}, DELETE /pods/{id} = terminate.
+API: Pods REST v2 (https://api.runpod.io/v2, Bearer key; v1 rest.runpod.io was retired 2026-11-15): POST /pods,
+GET /pods/{id}, DELETE /pods/{id} = terminate. GraphQL only for the account balance.
 Credit protection: at most ONE tune-o-clip Pod (any leftover one is terminated before a new one is created; Pods
-with other names are never touched), gpuCount 1 / volumeInGb 0 / containerDiskInGb <= 25 checked before every create,
+with other names are never touched), gpu.count 1 / no mounts (volume) / disk <= 25 GB checked before every create,
 a session spend cap (RUNPOD_MAX_SESSION_USD, default $1.50: elapsed s x $/hr / 3600) and an idle limit
 (RUNPOD_IDLE_TIMEOUT_MIN, default 10 min after the last run). Both are enforced twice: by a watchdog ON the Pod (works
 with this PC off or crashed) and by `status` from the panel every minute. No volume, so nothing is stored or billed
@@ -41,7 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import twitch_api  # noqa: E402  (stdlib .env reader)
 
-API = "https://rest.runpod.io/v1"
+API = "https://api.runpod.io/v2"
 CATALOG = "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&cloud={cloud}"  # REST v2, read-only
 GRAPHQL = "https://api.runpod.io/graphql"
 CLOUDS = ("SECURE", "COMMUNITY")
@@ -86,21 +87,8 @@ class Refused(RunPodError):
     """RunPod would not create this one Pod (the message says why when RunPod did)."""
 
 
-def gql_literal(v, enums=(), key=None):
-    """Python value -> GraphQL input literal (strings JSON-quoted, keys bare, the named enum fields unquoted)."""
-    if isinstance(v, dict):
-        return "{" + ", ".join(f"{k}: {gql_literal(x, enums, k)}" for k, x in v.items()) + "}"
-    if isinstance(v, list):
-        return "[" + ", ".join(gql_literal(x, enums) for x in v) + "]"
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if key in enums:
-        return str(v)
-    return json.dumps(v) if isinstance(v, str) else str(v)
-
-
 class RunPod:
-    """Pods REST v1. opener is injectable for tests; errors never include the key."""
+    """Pods REST v2. opener is injectable for tests; errors never include the key."""
 
     RETRY = (429, 500, 502, 503, 504)  # rate limit / RunPod hiccup: wait and ask again, never "gone" or "failed"
     BACKOFF = (5, 10, 20, 30, 45, 60)  # s; ~3 min in all, covers RunPod's per-minute rate-limit window
@@ -140,35 +128,22 @@ class RunPod:
             return e.code, text or f"(empty body, request id {e.headers.get('x-request-id') if e.headers else '?'})"
 
     def create(self, body):
+        """-> the new Pod. v2: 400 = this GPU / cloud can't be placed now (no capacity: only a human-readable
+        detail) and 403 = the pool is closed to this account: Refused, try the next placement. 402 (no balance),
+        422 (a body v2 rejects) and the rest stop the start."""
         code, data = self.call("POST", "/pods", body)
-        if code == 403:  # REST refuses without a reason (empty body): sold out, but seen on in-stock GPUs too
-            raise Refused(f"REST HTTP 403 {data}")
-        if code >= 500 and "no instances" in str(data).lower():  # live: 500 "There are no instances currently available"
-            raise Refused(f"REST HTTP {code}: {data}")
+        try:  # an error body arrives as text
+            data = json.loads(data) if isinstance(data, str) else data
+        except ValueError:
+            pass
+        why = data.get("detail") or data.get("title") if isinstance(data, dict) else data
+        if isinstance(data, dict) and data.get("errors"):
+            why = f"{why} {data['errors']}"
+        if code in (400, 403):
+            raise Refused(f"HTTP {code}: {why}")
         if code not in (200, 201) or not isinstance(data, dict) or not data.get("id"):
-            raise RunPodError(f"RunPod could not create the Pod (HTTP {code}): {data}")
+            raise RunPodError(f"RunPod could not create the Pod (HTTP {code}): {why}")
         return data
-
-    def deploy_graphql(self, body):
-        """The same Pod through GraphQL podFindAndDeployOnDemand, which says why when it can't (errors[0].message,
-        raised verbatim as Refused). A field this schema doesn't know is dropped and the call retried once."""
-        fields = {"cloudType": body["cloudType"], "gpuCount": body["gpuCount"], "volumeInGb": body["volumeInGb"],
-                  "containerDiskInGb": body["containerDiskInGb"], "gpuTypeId": body["gpuTypeIds"][0], "name": body["name"],
-                  "imageName": body["imageName"], "dockerArgs": "", "ports": ",".join(body["ports"]),
-                  "env": [{"key": k, "value": v} for k, v in body["env"].items()], "supportPublicIp": body.get("supportPublicIp", True)}
-        for _ in range(2):
-            code, data = self.call("POST", GRAPHQL, {"query": "mutation { podFindAndDeployOnDemand(input: %s) { id imageName machineId } }"
-                                                              % gql_literal(fields, enums=("cloudType",))})
-            errors = (data.get("errors") if isinstance(data, dict) else None) or []
-            pod = ((data.get("data") or {}).get("podFindAndDeployOnDemand") if isinstance(data, dict) else None)
-            if code == 200 and pod and pod.get("id") and not errors:
-                return pod
-            msg = str(errors[0].get("message")) if errors and isinstance(errors[0], dict) else f"HTTP {code}: {data}"
-            unknown = next((f for f in fields if f'"{f}"' in msg and "not defined" in msg), None)
-            if not unknown:
-                raise Refused(f"GraphQL: {msg}")
-            fields.pop(unknown)  # e.g. a field the GraphQL input type lacks: try once more without it
-        raise Refused(f"GraphQL: {msg}")
 
     def catalog(self):
         """{gpu id: {name, memory, price{cloud}, avail{cloud}, vcpu{cloud}, ram{cloud}}} for both clouds (v2 catalog)."""
@@ -192,11 +167,12 @@ class RunPod:
         return me or {}
 
     def list(self):
-        """Every Pod on the account (REST GET /pods; the list may come bare or wrapped)."""
+        """Every Pod on the account (GET /v2/pods -> {"pods": [...], "pagination": ...}).
+        shortcut: first page only (v2 pages hold 1000 Pods), follow pagination.nextCursor if that ever matters."""
         code, data = self.call("GET", "/pods")
         if code != 200:
             raise RunPodError(f"RunPod could not list Pods (HTTP {code}): {data}")
-        pods = data.get("pods") or data.get("data") or [] if isinstance(data, dict) else data
+        pods = data.get("pods") or [] if isinstance(data, dict) else data
         return [p for p in pods or [] if isinstance(p, dict)]
 
     def get(self, pod_id):
@@ -252,26 +228,24 @@ def should_terminate(now, created, last_activity, busy, idle_min, max_usd, rate)
 
 def ours(api):
     """Live tune-o-clip Pods on the account (the single-Pod lock and the orphan check use this)."""
-    return [p for p in api.list() if p.get("name") == POD_NAME and p.get("desiredStatus") != "TERMINATED"]
+    return [p for p in api.list() if p.get("name") == POD_NAME and p.get("status") != "TERMINATED"]
 
 
 def check_body(body):
-    """The hard limits, checked on every create: one GPU, no volume, a small container disk."""
-    if body.get("gpuCount") != 1 or body.get("volumeInGb") != 0 or not 0 < body.get("containerDiskInGb", 99) <= 25:
-        raise RunPodError(f"refusing to create a Pod outside the limits: {({k: body.get(k) for k in ('gpuCount', 'volumeInGb', 'containerDiskInGb')})}")
+    """The hard limits, checked on every create: one GPU, no volume (v2 "mounts"), a small container disk."""
+    if (body.get("gpu") or {}).get("count") != 1 or "mounts" in body or not 0 < body.get("disk", 99) <= 25:
+        raise RunPodError(f"refusing to create a Pod outside the limits: {({k: body.get(k) for k in ('gpu', 'mounts', 'disk')})}")
     return body
 
 
 # --- Pod lifecycle ------------------------------------------------------------------------------------------------
 
-def pod_body(public_key, key, gpu_first=None, image=None, cloud="SECURE", gpus=None):
+def pod_body(public_key, key, gpu=None, image=None, cloud="SECURE"):
+    """The v2 create body: ONE GPU type per Pod (start_cloud_pod walks the placements), no mounts = no volume. v2
+    rejects unknown fields (422), so nothing else goes in."""
     idle_min, max_usd = limits()
-    if gpus is None:
-        gpus = [gpu_first] + [g for g in GPU_IDS if g != gpu_first] if gpu_first else list(GPU_IDS)
-    return {"name": POD_NAME, "imageName": image or IMAGE, "gpuTypeIds": list(gpus), "gpuTypePriority": "custom",
-            "gpuCount": 1, "cloudType": cloud,
-            "supportPublicIp": True,  # SSH needs a public IP (always there on Secure Cloud; asked for on Community)
-            "containerDiskInGb": 25, "volumeInGb": 0, "ports": ["22/tcp"], "interruptible": False,
+    return {"name": POD_NAME, "image": image or IMAGE, "gpu": {"id": gpu or GPU_IDS[0], "count": 1}, "cloud": cloud,
+            "disk": 25, "ports": ["22/tcp"],
             "env": {"PUBLIC_KEY": public_key, "SSH_PUBLIC_KEY": public_key, "NVIDIA_DRIVER_CAPABILITIES": "all",  # + NVENC
                     "TOC_CLOUD": "1", "TOC_RUNPOD_KEY": key,  # the watchdog terminates its own Pod with it
                     "RUNPOD_IDLE_TIMEOUT_MIN": f"{idle_min:g}", "RUNPOD_MAX_SESSION_USD": f"{max_usd:g}"}}
@@ -320,14 +294,14 @@ def wait_ready(api, state, sleep=time.sleep, tries=60):
     """Poll every 10 s until the Pod has its public IP and a mapped SSH port (~1-5 min while the image pulls)."""
     for i in range(tries):
         pod = api.get(state["pod_id"])
-        if pod is None or pod.get("desiredStatus") == "TERMINATED":
-            raise RunPodError("the Pod disappeared while starting (out of capacity or terminated)")
-        port = (pod.get("portMappings") or {}).get("22")
-        if pod.get("publicIp") and port:
-            state.update(ip=pod["publicIp"], port=int(port))
+        if pod is None or pod.get("status") in ("TERMINATED", "ERROR"):
+            raise RunPodError(f"the Pod disappeared while starting ({(pod or {}).get('status') or 'gone'})")
+        direct = (pod.get("ssh") or {}).get("direct") or {}  # v2: null until it runs with a public 22/tcp port
+        if direct.get("host") and direct.get("port"):
+            state.update(ip=direct["host"], port=int(direct["port"]))
             return state
         if i % 3 == 0:
-            emit("deploying", f"Deploying Pod... ({pod.get('desiredStatus') or 'starting'}, {i * 10} s)")
+            emit("deploying", f"Deploying Pod... ({pod.get('status') or 'starting'}, {i * 10} s)")
         sleep(10)
     raise RunPodError("the Pod got no public IP / SSH port within 10 minutes")
 
@@ -419,7 +393,7 @@ if [ "$BAKED" = 1 ]; then
   say bootstrap "Pre-baked image: starting Ollama..."
 else
   say bootstrap "Installing ffmpeg + Ollama..."
-  apt-get update -qq >/dev/null && apt-get install -y -qq ffmpeg curl zstd pciutils >/dev/null  # the Ollama installer needs zstd
+  apt-get update -qq >/dev/null && apt-get install -y -qq ffmpeg curl zstd pciutils libegl1 >/dev/null  # zstd: the Ollama installer; libegl1: skia (pycaps captions)
   command -v ollama >/dev/null || curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1
 fi
 (OLLAMA_KEEP_ALIVE=10m nohup setsid ollama serve >/root/ollama.log 2>&1 < /dev/null &)
@@ -518,26 +492,20 @@ def start_cloud_pod(api, key, gpu_first=None, state_path=STATE, ctype=None, ssh_
     for cloud, gid, price in plan:
         emit("deploying", f"Requesting {gid} ({cloud.title()} cloud{f', ${price:g}/hr' if price else ''})"
                           + (" [your choice]" if gid == plan[0][1] else " [fallback]") + "...")
-        body = check_body(pod_body(public_key, key, image=os.environ.get("RUNPOD_IMAGE"), cloud=cloud, gpus=[gid]))
+        body = check_body(pod_body(public_key, key, gid, image=os.environ.get("RUNPOD_IMAGE"), cloud=cloud))
         try:
             pod = api.create(body)
-        except Refused as rest_err:  # REST gives no reason: GraphQL deploys it or says why
-            emit("deploying", f"{gid} / {cloud.lower()}: {rest_err}; asking GraphQL podFindAndDeployOnDemand...")
-            try:
-                pod = api.deploy_graphql(body)
-            except Refused as e:
-                tried.append(f"{gid} / {cloud.lower()}: {e}")
-                emit("deploying", f"{gid} / {cloud.lower()} refused. {e}")
-                continue
+        except Refused as e:  # no capacity / pool closed: the next placement
+            tried.append(f"{gid} / {cloud.lower()}: {e}")
+            emit("deploying", f"{gid} / {cloud.lower()} refused. {e}")
+            continue
         gpu = gid
-        if price and not pod.get("costPerHr"):
-            pod["costPerHr"] = price  # the GraphQL answer has no price: the catalog's
         break
     if pod is None:
         raise NoCapacity("RunPod refused every option it tried:\n  " + "\n  ".join(tried)
                          + "\nPick another GPU or cloud type in the RUNPOD drawer, or run Test Deploy (no cost).")
     now = clock()
-    state = {"pod_id": pod["id"], "gpu": gpu, "cost_per_hr": pod.get("costPerHr") or pod.get("adjustedCostPerHr"),
+    state = {"pod_id": pod["id"], "gpu": gpu, "cost_per_hr": pod.get("cost") or price,
              "created": now, "last_activity": now, "busy": False, "ready": False}
     save_state(state, state_path)  # first, so OFF can always find (and terminate) it
     emit("deploying", f"Deploying Pod {pod['id']}...", gpu=gpu, cost_per_hr=state["cost_per_hr"])
@@ -592,7 +560,7 @@ def status(api, state_path=STATE, clock=time.time):
     live = ours(api)
     if not state.get("pod_id"):
         if live:  # a Pod from a crashed / earlier session: the panel shows a red "click to terminate" banner
-            rate = sum(p.get("costPerHr") or 0 for p in live) or None
+            rate = sum(p.get("cost") or 0 for p in live) or None
             emit("orphan", f"WARNING: RunPod Pod Active (${rate or RATE_FALLBACK:.2f}/hr) - Click to Terminate",
                  pods=[p.get("id") for p in live], cost_per_hr=rate)
             return {"orphans": [p.get("id") for p in live]}
@@ -616,7 +584,7 @@ def status(api, state_path=STATE, clock=time.time):
 
 def diagnose(api, gpu=None, ctype=None):
     """No-cost checks (nothing is created): the key, balance + spend limit, the GPU's price / stock per cloud, and the
-    REST create permission (gpuCount 0 is refused by the schema check, so a 400 proves the key may create Pods)."""
+    REST create permission (gpu.count 0 is refused by v2's schema check, so a 422 proves the key may create Pods)."""
     gpu, ctype = gpu or os.environ.get("RUNPOD_GPU_ID") or GPU_IDS[0], ctype or cloud_type()
     code, _ = api.call("GET", "/pods")
     emit("diag", f"API key (GET /pods): {'OK' if code == 200 else f'HTTP {code}'}")
@@ -631,9 +599,9 @@ def diagnose(api, gpu=None, ctype=None):
         emit("diag", f"GPU catalog: {e}")
     emit("diag", f"{gpu}: " + (", ".join(f"{c.lower()} ${g['price'].get(c)}/hr {g['avail'].get(c)}" for c in CLOUDS)
                                + f", {g.get('memory')} GB VRAM" if g else "not in the catalog") + f" (cloud type {ctype})")
-    body = dict(pod_body("ssh-ed25519 AAAA diagnose", "x", gpus=[gpu], cloud=CLOUDS[0] if ctype == "ALL" else ctype), gpuCount=0)
-    code, data = api.call("POST", "/pods", body)
-    emit("diag", "REST create permission: " + ("OK (the schema check answered, nothing created)" if code == 400 else
+    body = pod_body("ssh-ed25519 AAAA diagnose", "x", gpu, cloud=CLOUDS[0] if ctype == "ALL" else ctype)
+    code, data = api.call("POST", "/pods", dict(body, gpu=dict(body["gpu"], count=0)))
+    emit("diag", "REST create permission: " + ("OK (the schema check answered, nothing created)" if code == 422 else
                                                f"HTTP {code} {str(data)[:200]}"))
     return code
 
