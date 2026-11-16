@@ -179,43 +179,29 @@ python backend/clipper.py URL --auto-edit                    # single runs too
 ```
 1. **Words:** faster-whisper `word_timestamps` on the clip *file*, cached as `words` in `clips_manifest.json`.
 2. **Framing** (`framing.py`, every clip, 2 fps samples): faces from OpenCV YuNet (`editor/models/`, 230 KB) decide
-   the layout. One small, steady face near a frame edge with no other comparable face = a webcam over gameplay ->
-   `split_stack`, top panel centred on that face with headroom. Faces that fit one 9:16 column -> `face_crop` (a
-   full-height column that smoothly follows them). Faces too far apart, or none -> `blur_fill`. A PP-OCRv3 text
-   detector (2.4 MB) spots captions already burned into the stream (a wide, centred, changing line low in the frame
-   while someone talks): then ours are off and `face_crop` becomes `blur_fill` so theirs stay whole.
+   the layout, and it stays static (no crop tracking, no zooms). One small, steady face near a frame edge with no
+   other comparable face = a verified webcam over gameplay -> `split_stack`, top panel centred on that face with
+   headroom. Anything else (no webcam, a big IRL face, several people) -> `blur_fill`. A PP-OCRv3 text detector
+   (2.4 MB) spots captions already burned into the stream (a wide, centred, changing line low in the frame while
+   someone talks): then ours are off and the layout is `blur_fill` so theirs show once, whole.
    `--facecam-box x,y,w,h` (0..1) / SETTINGS forces `split_stack` with that box.
-3. **Director** (`director.py`): local Ollama picks the scenario + title + 4 hashtags (rule-based fallback when
-   offline); cuts, zooms, effects, takeovers, mutes, speed ramps and SFX are placed deterministically. Pacing: words + Silero
+3. **Director** (`director.py`): local Ollama writes the title + 4 hashtags (rule-based fallback when offline); the
+   scenario (rule-based), cuts, speed ramp and cold-open teaser are placed deterministically. Pacing: words + Silero
    VAD speech (bundled with faster-whisper) + loud reactions are kept, every silence > 0.35 s is cut (0.25 s in
-   `unfiltered_chaos`), 0.1 s pad. `edl.json` times are source seconds (teaser effects: `"out": true` = output s).
-   Retention stack on every clip (`choreograph()`): snap punch-ins 1.35x on the climax / 1.3x on yells / 1.22x on
-   "!" / "?" lines, held to the next sentence, each with a -16 dB whoosh; slow 1.0 -> 1.12x push-ins wherever the
-   picture would sit still > 3 s; a 0.25 s +-8 px shake on yells (>= 85% of the peak and 2.5x the median); a -14 dB
-   thud on the climax; a 1.2-1.5 s cold open of a loud second-half climax on clips >= 16 s (1.25x, white flash +
-   whoosh on the hard cut into the setup; never for horror). Zooms grow about `framing.zoom_room()`'s anchor and stop
-   where a head (or the stream's own caption line) would leave the panel.
-   - `chat_roast`: record scratch (-14 dB) + audio cut before a real yell, reaction boost on it.
-   - `unfiltered_chaos`: jump cuts on pauses > 0.25 s, facecam takeover on every vocal peak, RGB split on screams.
-   - `horror_jumpscare`: vignette in the quiet -> 2-frame flash + takeover on the scare, hard cut 0.4 s after it.
-   - `confident_fail`: setup at 1.15x speed -> record scratch + audio cut at the fail -> grayscale aftermath.
-   - `awkward_irl`: blur_fill framing.
-4. **Renderer** (`renderer.py`), one ffmpeg pass:
-   - Framing: `split_stack` (facecam 1080x690 on top, 4 px seam, gameplay 1080x1226) with full-screen facecam
-     takeovers; `face_crop` (9:16 column, crop x follows the face track); or `blur_fill` (sharp 16:9 over a
-     quarter-res blurred fill).
-   - Effects: snap / ramp / creep / drift zooms (zoompan about the head-safe anchor, capped) and +-8 px damped trauma
-     shake on the panels (`face_crop` zooms too); reaction boost,
-     RGB split, grayscale, flash, vignette on the frame.
-   - One kinetic `.ass` caption track (none when the source has its own): 1-3 word lines (<= 1.3 s), uppercase heavy
-     font (Arial Black / Impact; `.ttf` files in `assets/fonts/` named after their family are loaded); the active word
-     pops 118% -> 100% in 70 ms and turns yellow (`&H0000FFFF`), cyan (`&H00FFFF00`) on hype / loud words; outline 4,
-     shadow 3, MarginV 660, side margins 140.
-   - Audio: original with mutes + speed ramps (`atempo`), SFX via `adelay` (procedural vine_boom, metal_pipe,
-     bass_boost, record_scratch, sad_violin, whoosh, pop, thud written to `assets/sfx/` on first run; your own
-     `.mp3`/`.wav` with the same name always wins), music from `assets/music/` ducked under speech,
-     `loudnorm=I=-14:TP=-1.5:LRA=11`.
-   - Encoder: h264_nvenc / h264_vaapi when a probe encode works, else libx264 superfast crf 20 (NVENC: p3, cq 22). Always 30 fps. A 26 s short renders in ~25 s here.
+   `unfiltered_chaos`), 0.1 s pad. `edl.json` times are source seconds. A 1.2-1.5 s cold open of a loud second-half
+   climax on clips >= 16 s (never for horror); `confident_fail` plays its setup at 1.15x; horror cuts 0.4 s after
+   the scare. No zooms, effect filters or SFX.
+4. **Renderer** (`renderer.py`):
+   - ffmpeg pass: trims + concat, `split_stack` (facecam 1080x690 on top, 4 px seam, gameplay 1080x1226) or
+     `blur_fill` (sharp 16:9 over a quarter-res blurred fill); audio = original + speed ramps (`atempo`), music from
+     `assets/music/` ducked under speech, `loudnorm=I=-14:TP=-1.5:LRA=11`. Encoder: h264_nvenc / h264_vaapi when a
+     probe encode works, else libx264 superfast crf 20 (NVENC: p3, cq 22). Always 30 fps.
+   - Captions + sound cues: [pycaps](https://github.com/francozanardi/pycaps) (MIT, `editor/captions.py`, its own
+     process; style in `editor/pycaps_style/`): 1-3 word uppercase Komika Axis lines, the active word zooms in and
+     turns yellow, hype words (regex: "no", "what", "bro", "let's go", "gta", "cops"...) green / red with a soft pop
+     cue. Word times = Whisper on each render's own cut audio (`renderer.cut_audio`), so captions match the cuts;
+     none when the source has its own captions. Browser-free renderer (html2pic), no AI service. Its encode is
+     libx264 veryfast crf 21. SETTINGS caption theme = one active-word colour.
 5. **QC** (`qc.py`): > 500 KB, 1080x1920, 7.0-58.5 s, mean volume -20..-10 dBFS, no black > 0.3 s. On failure the
    EDL is repaired (black spans stripped, teaser dropped / front trimmed when too long) and re-rendered, up to 2 times.
 

@@ -14,7 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl zst
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
 COPY requirements.txt /tmp/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" \
+    && python3 -m pip uninstall -y opencv-python \
+    && python3 -m pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.10,<5"
 
 # the models: ~1.6 GB Whisper into HF_HOME, ~9 GB Qwen into OLLAMA_MODELS (a throwaway server just for the pull)
 RUN python3 -c "from faster_whisper import download_model; download_model('${WHISPER}')"

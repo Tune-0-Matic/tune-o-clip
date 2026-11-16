@@ -275,7 +275,7 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     emit("stage", stage="edit", msg="Directing" + (f" with {model}" if online else " (heuristic, Ollama offline)"))
     edl = director.direct(words, audio, duration, model=model if online else None, meta=meta,
                           framing=fr, music=music)
-    if caption_tone:  # SETTINGS caption theme: one colour instead of per-word tones
+    if caption_tone:  # SETTINGS caption theme: one active-word colour instead of yellow + hype red
         edl["caption_tone"] = caption_tone
     if music_gain_db is not None:
         edl["bg_music"]["gain_db"] = float(music_gain_db)
@@ -304,10 +304,9 @@ def edit_clip(manifest_path, clip_id, out_dir=READY, model=DEFAULT_MODEL, encode
     post = {"title": edl["title"], "hashtags": edl["hashtags"], "social_title": edl["social_title"],
             "transcript": " ".join(w["word"] for w in words), "duration": report["duration"],
             "archetype": edl["archetype"], "scenario": edl["scenario"], "directed_by": edl["directed_by"],
-            "font": edl["font"], "layout": edl["layout"], "facecam_box": facecam if edl["layout"] == "split_stack" else None,
-            "cuts": edl["cuts"], "hook_teaser": edl["hook_teaser"], "zooms": len(edl["zooms"]),
-            "takeovers": len(edl["takeovers"]), "effects": sorted({f["type"] for f in edl["filters"]}),
-            "sfx": [s["name"] for s in edl["sfx"]],
+            "captions": "none (source has its own)" if edl.get("source_captions") else "pycaps",
+            "layout": edl["layout"], "facecam_box": facecam if edl["layout"] == "split_stack" else None,
+            "cuts": edl["cuts"], "hook_teaser": edl["hook_teaser"],
             "credit": {k: meta.get(k) for k in ("broadcaster_name", "creator_name", "view_count", "url") if meta.get(k)},
             "source": {"manifest": str(manifest_path), "clip_id": clip["clip_id"], "file": clip["file"]},
             "qc": {k: report[k] for k in ("duration", "mean_db", "bytes")}}
@@ -375,7 +374,7 @@ def main():
     ap.add_argument("--no-ollama", action="store_true")
     ap.add_argument("--whisper-model", default=scorer.DEFAULT_WHISPER)
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
-    ap.add_argument("--caption-theme", choices=sorted(THEMES), help="one caption colour (default: per-word tones by scenario)")
+    ap.add_argument("--caption-theme", choices=sorted(THEMES), help="one active-word colour (default: yellow, hype words red)")
     ap.add_argument("--music-gain", type=float, help="background music gain in dB (default -22)")
     ap.add_argument("--speaker-captions", action="store_true", help=argparse.SUPPRESS)  # removed feature: accepted, ignored
     st = load_settings()

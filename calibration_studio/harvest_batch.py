@@ -171,7 +171,7 @@ def decision_log(batch):
                        "trimmed_sec": round(dur - kept, 2) if edl else None, "hook_teaser": edl.get("hook_teaser"),
                        "speed": edl.get("speed"), "mutes": edl.get("mutes"), "zooms": edl.get("zooms"),
                        "filters": edl.get("filters"), "takeovers": edl.get("takeovers"), "sfx": edl.get("sfx"),
-                       "font": edl.get("font"), "caption_tone": edl.get("caption_tone") or "per-word tones",
+                       "font": edl.get("font") or "pycaps Komika Axis", "caption_tone": edl.get("caption_tone") or "yellow + hype words",
                        "title": edl.get("social_title"), "qc": {k: (rec.get("qc") or {}).get(k) for k in ("duration", "mean_db")}}})
     return entries
 

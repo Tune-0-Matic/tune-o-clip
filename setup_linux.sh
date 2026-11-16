@@ -53,13 +53,7 @@ say "System packages"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip ffmpeg curl git ca-certificates \
   unzip fonts-dejavu-core fonts-liberation fontconfig mesa-va-drivers vainfo
-# The caption fonts are Arial Black / Impact (editor/director.py FONTS). Microsoft's core fonts package has both; it
-# needs its EULA accepted. Without it libass falls back to DejaVu Sans Bold: captions still render, just look different.
-echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ttf-mscorefonts-installer; then
-  warn "ttf-mscorefonts-installer failed (no multiverse / offline): captions will use DejaVu Sans Bold instead of Arial Black / Impact"
-fi
-fc-list | grep -qi "arial black" && echo "Caption fonts: Arial Black + Impact installed" || warn "Arial Black not found: DejaVu fallback"
+# Caption font: pycaps ships Komika Axis inside its package (editor/captions.py), no system fonts needed.
 
 # --- 3. Ollama: one model at a time, kept warm 5 min ----------------------------------------------------------------
 say "Ollama"
@@ -93,6 +87,8 @@ say "Python environment (.venv)"
 [ -x .venv/bin/python ] || python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install --upgrade -r backend/requirements.txt  # --upgrade: always the latest yt-dlp
+# pycaps -> movielite pulls the GUI opencv-python (needs libGL; owns cv2 together with headless): keep headless only
+.venv/bin/python -m pip uninstall -y -q opencv-python && .venv/bin/python -m pip install -q --force-reinstall --no-deps "opencv-python-headless>=4.10,<5" || true
 echo "Downloading the Whisper model ($WHISPER, ~480 MB) once..."
 .venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('$WHISPER', device='cpu', compute_type='int8')"
 

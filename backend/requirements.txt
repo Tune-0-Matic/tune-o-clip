@@ -4,3 +4,8 @@ deno
 numpy
 faster-whisper
 opencv-python-headless>=4.10,<5  # editor/framing.py: YuNet faces + PP-OCR text detector (editor/models/*.onnx)
+# editor/captions.py: pycaps (MIT, GitHub only: the PyPI "pycaps" is an unrelated Linux-capabilities package), pinned.
+# html2pic = its browser-free renderer. Its movielite dependency pulls the GUI opencv-python (needs libGL, clashes with
+# headless over cv2): every installer runs `pip uninstall -y opencv-python` + reinstalls headless right after this file.
+pycaps @ https://github.com/francozanardi/pycaps/archive/e2d36edfa08e3307d65b15bb20f17399dc2c9b40.zip
+html2pic

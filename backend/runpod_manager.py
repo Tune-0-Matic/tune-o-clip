@@ -432,6 +432,10 @@ else
 fi
 # a no-op in the baked image unless requirements.txt gained a package since the build
 python3 -m pip install -q -r backend/requirements.txt nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+# pycaps -> movielite pulls the GUI opencv-python (needs libGL; owns cv2 together with headless): keep headless only
+if python3 -m pip show -q opencv-python >/dev/null 2>&1; then
+  python3 -m pip uninstall -y -q opencv-python && python3 -m pip install -q --force-reinstall --no-deps "opencv-python-headless>=4.10,<5"
+fi
 NV=$(python3 -c "import glob, os, site; print(':'.join(glob.glob(os.path.join(site.getsitepackages()[0], 'nvidia', '*', 'lib'))))")
 printf 'export TOC_CLOUD=1 TOC_RUNPOD_RATE=@RATE@ TOC_RUNPOD_CREATED=@CREATED@ LD_LIBRARY_PATH=%s:${LD_LIBRARY_PATH:-}\n' "$NV" > /root/toc_env.sh
 if [ "$BAKED" = 1 ]; then echo 'export OLLAMA_MODELS=/opt/ollama/models HF_HOME=/opt/hf_cache' >> /root/toc_env.sh; fi
