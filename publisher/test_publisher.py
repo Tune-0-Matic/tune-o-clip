@@ -412,6 +412,11 @@ assert yp.UPLOAD_URL.startswith("https://www.googleapis.com/upload/youtube/v3/vi
 assert g.puts == [(f"bytes 0-{C - 1}/{size}", C), (f"bytes {C - K}-{2 * C - K - 1}/{size}", C),
                   (f"bytes {2 * C - K}-{size - 1}/{size}", size - (2 * C - K))], g.puts
 assert all(n % K == 0 for _, n in g.puts[:-1]) and g.checks == 1 and naps == [2]
+# scheduled publishing: publishAt goes in status, the upload is private until then (the API's rule)
+g = FakeGoogle()
+res = yp.YouTube("cid", "csec", yp_tok, opener=g).upload(vid, "t", "d", [], "public", publish_at="2026-11-17T14:00:00Z")
+assert g.meta["status"] == {"privacyStatus": "private", "selfDeclaredMadeForKids": False, "publishAt": "2026-11-17T14:00:00Z"}, g.meta
+assert res["publish_at"] == "2026-11-17T14:00:00Z", res
 
 # expired access token mid-way: one 401 -> refresh (Google sends no new refresh token: the old one is kept) -> retried
 yp_tok.write_text(json.dumps({"access_token": "OLD", "refresh_token": "1//RT", "expires_at": time.time() + 3600}))

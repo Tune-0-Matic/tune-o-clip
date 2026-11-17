@@ -170,11 +170,16 @@ class YouTube:
                 return self.opener(make_req(self.token(force_refresh=True)), timeout=300)
             raise
 
-    def upload(self, video, title, description, tags, privacy="public", retries=5):
-        """videos.insert, resumable. -> {"video_id", "url", "privacy", "privacy_note"?}."""
+    def upload(self, video, title, description, tags, privacy="public", retries=5, publish_at=None):
+        """videos.insert, resumable. -> {"video_id", "url", "privacy", "privacy_note"?, "publish_at"?}.
+        publish_at (RFC 3339 UTC, e.g. "2026-11-17T14:00:00Z"): YouTube's own scheduled publishing; the video is
+        uploaded private (the API requires that for publishAt) and YouTube makes it public at that time."""
         size = Path(video).stat().st_size
+        if publish_at:
+            privacy = "private"
+        status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False, **({"publishAt": publish_at} if publish_at else {})}
         meta = json.dumps({"snippet": {"title": title, "description": description, "tags": tags, "categoryId": GAMING},
-                           "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}}).encode()
+                           "status": status}).encode()
         try:
             with self._send(lambda tok: urllib.request.Request(UPLOAD_URL, meta, method="POST", headers={
                     "Authorization": f"Bearer {tok}", "Content-Type": "application/json; charset=UTF-8",
@@ -224,6 +229,8 @@ class YouTube:
         out = {"video_id": vid, "url": f"https://youtube.com/shorts/{vid}", "privacy": got}
         if got != privacy:  # e.g. the channel's own settings forced private
             out["privacy_note"] = f"asked for {privacy}, YouTube made it {got}"
+        if publish_at:
+            out["publish_at"] = (res.get("status") or {}).get("publishAt") or publish_at
         return out
 
     def _uploaded(self, session, size):
