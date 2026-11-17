@@ -33,6 +33,8 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet%2Cstatus"
 SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"  # channels.list(mine=true): which channel a login is
+CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
 REDIRECT_PORT = 3456
 REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
 TOKEN_FILE = ROOT / "workspace" / "youtube_token.json"
@@ -86,7 +88,8 @@ def _friendly(reason, message, code):
 
 class YouTube:
     def __init__(self, client_id=None, client_secret=None, token_path=TOKEN_FILE, client_file=CLIENT_FILE,
-                 opener=urllib.request.urlopen, clock=time.time, sleep=time.sleep):
+                 opener=urllib.request.urlopen, clock=time.time, sleep=time.sleep, scope=SCOPE):
+        self.scope = scope
         twitch_api.load_env()
         cid, secret = client_id or os.environ.get("YOUTUBE_CLIENT_ID"), client_secret or os.environ.get("YOUTUBE_CLIENT_SECRET")
         if not (cid and secret):  # the JSON Google Cloud Console offers for download ("installed" app)
@@ -106,7 +109,7 @@ class YouTube:
 
     def auth_url(self, state, challenge):
         return AUTH_URL + "?" + urllib.parse.urlencode({
-            "client_id": self.cid, "redirect_uri": REDIRECT_URI, "response_type": "code", "scope": SCOPE,
+            "client_id": self.cid, "redirect_uri": REDIRECT_URI, "response_type": "code", "scope": self.scope,
             "access_type": "offline", "prompt": "consent", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": state})
 
@@ -170,15 +173,27 @@ class YouTube:
                 return self.opener(make_req(self.token(force_refresh=True)), timeout=300)
             raise
 
-    def upload(self, video, title, description, tags, privacy="public", retries=5, publish_at=None):
+    def channel(self):
+        """channels.list(mine=true) -> {"id", "title"} of the channel this login posts to (needs READ_SCOPE)."""
+        try:
+            with self._send(lambda tok: urllib.request.Request(CHANNELS_URL, headers={"Authorization": f"Bearer {tok}"})) as r:
+                items = json.loads(r.read()).get("items") or []
+        except urllib.error.HTTPError as e:
+            raise YouTubeError(_friendly(*_google_error(e), e.code))
+        if not items:
+            raise YouTubeError("[PUBLISH] YouTube Auth Failed: this Google account has no YouTube channel yet")
+        return {"id": items[0]["id"], "title": (items[0].get("snippet") or {}).get("title", "")}
+
+    def upload(self, video, title, description, tags, privacy="public", retries=5, publish_at=None, category=GAMING,
+               made_for_kids=False):
         """videos.insert, resumable. -> {"video_id", "url", "privacy", "privacy_note"?, "publish_at"?}.
         publish_at (RFC 3339 UTC, e.g. "2026-11-17T14:00:00Z"): YouTube's own scheduled publishing; the video is
         uploaded private (the API requires that for publishAt) and YouTube makes it public at that time."""
         size = Path(video).stat().st_size
         if publish_at:
             privacy = "private"
-        status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False, **({"publishAt": publish_at} if publish_at else {})}
-        meta = json.dumps({"snippet": {"title": title, "description": description, "tags": tags, "categoryId": GAMING},
+        status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": bool(made_for_kids), **({"publishAt": publish_at} if publish_at else {})}
+        meta = json.dumps({"snippet": {"title": title, "description": description, "tags": tags, "categoryId": str(category)},
                            "status": status}).encode()
         try:
             with self._send(lambda tok: urllib.request.Request(UPLOAD_URL, meta, method="POST", headers={

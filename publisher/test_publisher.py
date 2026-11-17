@@ -228,6 +228,11 @@ assert res == {"publish_id": "v_pub~1", "status": "PUBLISH_COMPLETE", "privacy":
 assert fake.init["post_info"] == {"title": "Title — hook #fyp #a #b #c #d", "privacy_level": "PUBLIC_TO_EVERYONE",
                                   "disable_comment": False, "disable_duet": True, "disable_stitch": False}, fake.init
 assert fake.init["source_info"] == {"source": "FILE_UPLOAD", "video_size": 3000, "chunk_size": 3000, "total_chunk_count": 1}
+first_chunks = list(fake.chunks)
+fake.statuses = ["PUBLISH_COMPLETE"]
+tt.post(vid, "x", "SELF_ONLY", allow_comment=False, allow_stitch=False)  # our toggles can only turn things off
+assert {k: fake.init["post_info"][k] for k in ("disable_comment", "disable_duet", "disable_stitch")} ==     {"disable_comment": True, "disable_duet": True, "disable_stitch": True}, fake.init
+fake.chunks[:] = first_chunks
 assert fake.chunks == [("bytes 0-2999/3000", 3000, 3000)], fake.chunks
 
 # chunked upload (> 64 MB): floor(size / 10 MB) chunks, the last one takes the remainder, sequential ranges
@@ -417,6 +422,22 @@ g = FakeGoogle()
 res = yp.YouTube("cid", "csec", yp_tok, opener=g).upload(vid, "t", "d", [], "public", publish_at="2026-11-17T14:00:00Z")
 assert g.meta["status"] == {"privacyStatus": "private", "selfDeclaredMadeForKids": False, "publishAt": "2026-11-17T14:00:00Z"}, g.meta
 assert res["publish_at"] == "2026-11-17T14:00:00Z", res
+g = FakeGoogle()
+yp.YouTube("cid", "csec", yp_tok, opener=g).upload(vid, "t", "d", [], "unlisted", category="24", made_for_kids=True)
+assert g.meta["snippet"]["categoryId"] == "24" and g.meta["status"] == {"privacyStatus": "unlisted", "selfDeclaredMadeForKids": True}, g.meta
+# channels.list(mine=true): which channel a login is; the extra read scope only when asked for
+chan_reqs = []
+def chan_opener(req, timeout=None):
+    chan_reqs.append(req)
+    return Resp(json.dumps({"items": [{"id": "UCabc", "snippet": {"title": "GTA Clips"}}]}).encode())
+ro = yp.YouTube("cid", "csec", yp_tok, opener=chan_opener, scope=yp.SCOPE + " " + yp.READ_SCOPE)
+assert ro.channel() == {"id": "UCabc", "title": "GTA Clips"} and chan_reqs[0].full_url == yp.CHANNELS_URL
+assert "youtube.readonly" in urllib.parse.parse_qs(urllib.parse.urlparse(ro.auth_url("s", "c")).query)["scope"][0]
+try:
+    yp.YouTube("cid", "csec", yp_tok, opener=lambda req, timeout=None: Resp(b'{"items": []}')).channel()
+    raise AssertionError("no channel must raise")
+except yp.YouTubeError as e:
+    assert "no YouTube channel" in str(e)
 
 # expired access token mid-way: one 401 -> refresh (Google sends no new refresh token: the old one is kept) -> retried
 yp_tok.write_text(json.dumps({"access_token": "OLD", "refresh_token": "1//RT", "expires_at": time.time() + 3600}))

@@ -167,7 +167,8 @@ class TikTok:
     def creator_info(self):
         return self._api("/creator_info/query/")
 
-    def post(self, video, caption, privacy="PUBLIC_TO_EVERYONE", poll_every=5, timeout=900):
+    def post(self, video, caption, privacy="PUBLIC_TO_EVERYONE", poll_every=5, timeout=900, allow_comment=True,
+             allow_duet=True, allow_stitch=True):
         """Upload + publish one video. -> {"publish_id", "status", "post_id", "privacy", "creator"}.
         PUBLISH_COMPLETE = posted; a public post's id arrives only after TikTok's moderation (often ~1 min)."""
         info = self.creator_info()
@@ -176,9 +177,10 @@ class TikTok:
         chunk, count = plan_chunks(size)
         init = self._api("/video/init/", {
             "post_info": {"title": caption, "privacy_level": level,
-                          "disable_comment": bool(info.get("comment_disabled")),
-                          "disable_duet": bool(info.get("duet_disabled")),
-                          "disable_stitch": bool(info.get("stitch_disabled"))},
+                          # off when the creator turned it off in TikTok's app, or we did
+                          "disable_comment": bool(info.get("comment_disabled")) or not allow_comment,
+                          "disable_duet": bool(info.get("duet_disabled")) or not allow_duet,
+                          "disable_stitch": bool(info.get("stitch_disabled")) or not allow_stitch},
             "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": count}})
         with open(video, "rb") as f:
             for i in range(count):
